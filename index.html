@@ -159,11 +159,11 @@
             badgeCls: 'bg-blue-100 text-blue-800 border-blue-300'
         }));
 
-        // --- AUTOMATIC DEMO CACHE CLEAR (MIGRATION TO SUPABASE) ---
-        if (!localStorage.getItem('app_v3_clean_migrated')) {
+        // Force reset old demo cache
+        if (!localStorage.getItem('app_v4_clean_migrated')) {
             localStorage.removeItem('app_workers_master');
             localStorage.removeItem('app_schedules_master');
-            localStorage.setItem('app_v3_clean_migrated', 'true');
+            localStorage.setItem('app_v4_clean_migrated', 'true');
         }
 
         // --- MAIN APP COMPONENT ---
@@ -207,14 +207,26 @@
                 return saved ? JSON.parse(saved) : [];
             });
 
+            const showToast = (message, type = 'success') => {
+                setToast({ message, type });
+                setTimeout(() => setToast(null), 5000);
+            };
+
             // --- SUPABASE DYNAMIC SYNC & INITIAL SEEDING ---
             const fetchSupabaseData = async () => {
                 if (!supabase) return;
                 try {
                     // 1. Fetch Workers from Supabase
-                    const { data: wData, error: wErr } = await supabase.from('workers').select('*').eq('is_deleted', false).order('display_order', { ascending: true });
+                    const { data: wData, error: wErr } = await supabase
+                        .from('workers')
+                        .select('*')
+                        .eq('is_deleted', false)
+                        .order('display_order', { ascending: true });
                     
-                    if (!wErr && wData && wData.length > 0) {
+                    if (wErr) {
+                        console.error('Fetch Workers Error:', wErr);
+                        showToast(`DB読み込み失敗 (Workers): ${wErr.message}`, 'error');
+                    } else if (wData && wData.length > 0) {
                         const formattedW = wData.map(w => ({
                             id: String(w.worker_id || w.id),
                             name: w.full_name || w.name,
@@ -223,24 +235,35 @@
                             badgeCls: 'bg-blue-100 text-blue-800'
                         }));
                         setWorkers(formattedW);
-                    } else if (!wErr && (!wData || wData.length === 0)) {
+                    } else {
                         // Seed Workers Table in Supabase if Empty
                         const seedPayload = INITIAL_WORKERS.map((w, idx) => ({
-                            worker_id: w.id,
-                            worker_code: w.id,
+                            worker_id: String(w.id),
+                            worker_code: String(w.id),
                             full_name: w.name,
                             role_name: w.role,
                             color_code: w.color,
                             display_order: idx + 1,
                             is_deleted: false
                         }));
-                        await supabase.from('workers').upsert(seedPayload);
-                        setWorkers(INITIAL_WORKERS);
+                        const { error: seedErr } = await supabase.from('workers').upsert(seedPayload);
+                        if (seedErr) {
+                            console.error('Seed Workers Error:', seedErr);
+                        } else {
+                            setWorkers(INITIAL_WORKERS);
+                        }
                     }
 
                     // 2. Fetch Schedules from Supabase
-                    const { data: sData, error: sErr } = await supabase.from('schedules').select('*').eq('is_deleted', false);
-                    if (!sErr && sData) {
+                    const { data: sData, error: sErr } = await supabase
+                        .from('schedules')
+                        .select('*')
+                        .eq('is_deleted', false);
+
+                    if (sErr) {
+                        console.error('Fetch Schedules Error:', sErr);
+                        showToast(`DB読み込み失敗 (Schedules): ${sErr.message}`, 'error');
+                    } else if (sData) {
                         const formattedS = sData.map(s => ({
                             id: String(s.schedule_id || s.id),
                             date: s.work_date || s.date,
@@ -258,6 +281,7 @@
                     }
                 } catch (e) {
                     console.error('Supabase Init Error:', e);
+                    showToast(`Supabase通信例外: ${e.message}`, 'error');
                 }
             };
 
@@ -282,11 +306,6 @@
                 sessionStorage.setItem('app_is_authenticated', isAuthenticated ? 'true' : 'false');
             }, [isAuthenticated]);
 
-            const showToast = (message, type = 'success') => {
-                setToast({ message, type });
-                setTimeout(() => setToast(null), 3000);
-            };
-
             const handleLogout = () => {
                 setIsAuthenticated(false);
                 sessionStorage.removeItem('app_is_authenticated');
@@ -298,18 +317,31 @@
                 const targetId = scheduleData.id || 's_' + Date.now();
                 const newEntry = { ...scheduleData, id: targetId };
 
-                if (scheduleData.id) {
-                    setSchedules(prev => prev.map(s => s.id === scheduleData.id ? newEntry : s));
-                    showToast('予定を更新しました');
-                } else {
-                    setSchedules(prev => [...prev, newEntry]);
-                    showToast('新規予定を割り当てました');
-                }
+                // Update UI state immediately
+                setSchedules(prev => {
+                    const exists = prev.some(s => s.id === targetId);
+                    return exists ? prev.map(s => s.id === targetId ? newEntry : s) : [...prev, newEntry];
+                });
 
                 if (supabase) {
                     try {
+                        // 1. Ensure worker exists in Supabase to satisfy references
+                        const targetWorker = workers.find(w => w.id === scheduleData.workerId);
+                        if (targetWorker) {
+                            await supabase.from('workers').upsert({
+                                worker_id: String(targetWorker.id),
+                                worker_code: String(targetWorker.id),
+                                full_name: targetWorker.name,
+                                role_name: targetWorker.role || '現場担当',
+                                color_code: targetWorker.color || 'bg-blue-600',
+                                display_order: 1,
+                                is_deleted: false
+                            });
+                        }
+
+                        // 2. Save schedule to Supabase
                         const payload = {
-                            schedule_id: targetId,
+                            schedule_id: String(targetId),
                             work_date: scheduleData.date,
                             worker_id: String(scheduleData.workerId),
                             start_time: scheduleData.startTime,
@@ -321,15 +353,22 @@
                             notes: scheduleData.notes || '',
                             is_deleted: false
                         };
+
                         const { error } = await supabase.from('schedules').upsert(payload);
+
                         if (error) {
                             console.error('Supabase Upsert Error:', error);
+                            showToast(`保存エラー: ${error.message} (${error.details || error.code})`, 'error');
                         } else {
+                            showToast('Supabaseへ正常に登録・保存しました！');
                             fetchSupabaseData();
                         }
                     } catch (err) {
                         console.error('Supabase Sync Exception:', err);
+                        showToast(`保存例外エラー: ${err.message}`, 'error');
                     }
+                } else {
+                    showToast('予定を保存しました (ローカル)');
                 }
 
                 setIsModalOpen(false);
@@ -341,8 +380,12 @@
                 showToast('予定を削除しました');
                 if (supabase) {
                     try {
-                        await supabase.from('schedules').update({ is_deleted: true }).eq('schedule_id', id);
-                        fetchSupabaseData();
+                        const { error } = await supabase.from('schedules').update({ is_deleted: true }).eq('schedule_id', id);
+                        if (error) {
+                            showToast(`削除エラー: ${error.message}`, 'error');
+                        } else {
+                            fetchSupabaseData();
+                        }
                     } catch (err) {
                         console.error('Supabase Delete Sync Error:', err);
                     }
@@ -364,13 +407,19 @@
                             display_order: idx + 1,
                             is_deleted: false
                         }));
-                        await supabase.from('workers').upsert(payload);
-                        fetchSupabaseData();
+                        const { error } = await supabase.from('workers').upsert(payload);
+                        if (error) {
+                            showToast(`マスタ更新エラー: ${error.message}`, 'error');
+                        } else {
+                            fetchSupabaseData();
+                            showToast('作業員マスタをSupabaseへ更新保存しました');
+                        }
                     } catch (err) {
                         console.error('Supabase Save Workers Error:', err);
                     }
+                } else {
+                    showToast('作業員マスタを更新しました');
                 }
-                showToast('作業員マスタを更新しました');
                 setIsWorkerMasterOpen(false);
             };
 
@@ -416,9 +465,11 @@
                 <div className="flex flex-col min-h-screen text-slate-800 bg-slate-100">
                     {/* TOAST NOTIFICATION */}
                     {toast && (
-                        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl border border-slate-700 flex items-center gap-2 animate-in fade-in slide-in-from-bottom duration-200 text-xs sm:text-sm font-semibold">
-                            <Icon name="check" className="w-5 h-5 text-emerald-400" />
-                            <span>{toast.message}</span>
+                        <div className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-2xl border flex items-center gap-2.5 animate-in fade-in slide-in-from-bottom duration-200 text-xs sm:text-sm font-semibold max-w-md ${
+                            toast.type === 'error' ? 'bg-red-900 border-red-700 text-red-100' : 'bg-slate-900 border-slate-700 text-white'
+                        }`}>
+                            <Icon name={toast.type === 'error' ? 'alert' : 'check'} className={`w-5 h-5 shrink-0 ${toast.type === 'error' ? 'text-red-400' : 'text-emerald-400'}`} />
+                            <span className="break-all">{toast.message}</span>
                         </div>
                     )}
 
@@ -470,6 +521,15 @@
                                 </button>
 
                                 <button
+                                    onClick={() => fetchSupabaseData()}
+                                    className="bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition"
+                                    title="手動でSupabaseの最新データを再取得"
+                                >
+                                    <Icon name="database" className="w-4 h-4" />
+                                    <span>データ再読み込み</span>
+                                </button>
+
+                                <button
                                     onClick={() => setIsWorkerMasterOpen(true)}
                                     className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition"
                                 >
@@ -491,14 +551,6 @@
                                 >
                                     <Icon name="lock" className="w-4 h-4" />
                                     <span>ロック</span>
-                                </button>
-
-                                <button
-                                    onClick={() => setIsExportModalOpen(true)}
-                                    className="bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition"
-                                >
-                                    <Icon name="download" className="w-4 h-4" />
-                                    <span className="hidden lg:inline">入出力</span>
                                 </button>
                             </div>
                         </div>
@@ -594,15 +646,6 @@
                                         集計
                                     </button>
                                 </div>
-
-                                {currentView === 'timeline' && (
-                                    <button
-                                        onClick={() => setDensity(d => d === 'compact' ? 'normal' : 'compact')}
-                                        className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-xs font-bold transition flex items-center gap-1"
-                                    >
-                                        {density === 'compact' ? '高密度' : '標準'}
-                                    </button>
-                                )}
                             </div>
                         </div>
                     </div>
