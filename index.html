@@ -26,8 +26,8 @@
         }
     </script>
     <!-- React & ReactDOM -->
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin crossorigin="anonymous"></script>
     <!-- Babel for JSX -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <!-- Supabase JS Client Library -->
@@ -71,13 +71,13 @@
 
     <script type="text/babel">
         // =============================================================================
-        //  【Supabase 接続設定】
+        //  【Supabase 接続設定箇所】
         // =============================================================================
         const SUPABASE_URL = "https://uahtfbuwzpwguuwgevno.supabase.co"; 
         const SUPABASE_ANON_KEY = "sb_publishable_g2E2kWtZYGt_vw4yuFOJMQ_wVeqH9Jz"; 
 
         // Initialize Supabase Client
-        const supabase = (window.supabase && SUPABASE_URL !== "YOUR_SUPABASE_URL_HERE")
+        const supabase = (window.supabase && SUPABASE_URL.startsWith("https://"))
             ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
             : null;
 
@@ -150,7 +150,7 @@
             '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00'
         ];
 
-        // --- DEFAULT WORKER MASTER PLACEHOLDERS ---
+        // --- CLEAN INITIAL WORKER MASTER (15 WORKERS) ---
         const INITIAL_WORKERS = Array.from({ length: 15 }, (_, i) => ({
             id: `w${i + 1}`,
             name: `作業員 ${i + 1}`,
@@ -158,6 +158,13 @@
             color: 'bg-blue-600',
             badgeCls: 'bg-blue-100 text-blue-800 border-blue-300'
         }));
+
+        // --- AUTOMATIC DEMO CACHE CLEAR (MIGRATION TO SUPABASE) ---
+        if (!localStorage.getItem('app_v3_clean_migrated')) {
+            localStorage.removeItem('app_workers_master');
+            localStorage.removeItem('app_schedules_master');
+            localStorage.setItem('app_v3_clean_migrated', 'true');
+        }
 
         // --- MAIN APP COMPONENT ---
         function App() {
@@ -200,30 +207,44 @@
                 return saved ? JSON.parse(saved) : [];
             });
 
-            // Supabase Dynamic Sync
+            // --- SUPABASE DYNAMIC SYNC & INITIAL SEEDING ---
             const fetchSupabaseData = async () => {
                 if (!supabase) return;
                 try {
-                    // 1. Fetch Workers
-                    const { data: wData, error: wErr } = await supabase.from('workers').select('*');
+                    // 1. Fetch Workers from Supabase
+                    const { data: wData, error: wErr } = await supabase.from('workers').select('*').eq('is_deleted', false).order('display_order', { ascending: true });
+                    
                     if (!wErr && wData && wData.length > 0) {
                         const formattedW = wData.map(w => ({
-                            id: w.worker_id || w.id,
+                            id: String(w.worker_id || w.id),
                             name: w.full_name || w.name,
                             role: w.role_name || w.role,
                             color: w.color_code || 'bg-blue-600',
                             badgeCls: 'bg-blue-100 text-blue-800'
                         }));
                         setWorkers(formattedW);
+                    } else if (!wErr && (!wData || wData.length === 0)) {
+                        // Seed Workers Table in Supabase if Empty
+                        const seedPayload = INITIAL_WORKERS.map((w, idx) => ({
+                            worker_id: w.id,
+                            worker_code: w.id,
+                            full_name: w.name,
+                            role_name: w.role,
+                            color_code: w.color,
+                            display_order: idx + 1,
+                            is_deleted: false
+                        }));
+                        await supabase.from('workers').upsert(seedPayload);
+                        setWorkers(INITIAL_WORKERS);
                     }
 
-                    // 2. Fetch Schedules
+                    // 2. Fetch Schedules from Supabase
                     const { data: sData, error: sErr } = await supabase.from('schedules').select('*').eq('is_deleted', false);
                     if (!sErr && sData) {
                         const formattedS = sData.map(s => ({
                             id: String(s.schedule_id || s.id),
                             date: s.work_date || s.date,
-                            workerId: s.worker_id || s.workerId,
+                            workerId: String(s.worker_id || s.workerId),
                             startTime: s.start_time ? s.start_time.slice(0, 5) : '08:00',
                             endTime: s.end_time ? s.end_time.slice(0, 5) : '17:00',
                             title: s.title,
@@ -244,7 +265,7 @@
                 fetchSupabaseData();
             }, []);
 
-            // Sync to LocalStorage
+            // LocalStorage Auto-Sync
             useEffect(() => {
                 localStorage.setItem('app_auth_settings', JSON.stringify(authSettings));
             }, [authSettings]);
@@ -290,7 +311,7 @@
                         const payload = {
                             schedule_id: targetId,
                             work_date: scheduleData.date,
-                            worker_id: scheduleData.workerId,
+                            worker_id: String(scheduleData.workerId),
                             start_time: scheduleData.startTime,
                             end_time: scheduleData.endTime,
                             title: scheduleData.title,
@@ -328,6 +349,29 @@
                 }
                 setIsModalOpen(false);
                 setEditingSchedule(null);
+            };
+
+            const handleSaveWorkersMaster = async (updatedWorkers) => {
+                setWorkers(updatedWorkers);
+                if (supabase) {
+                    try {
+                        const payload = updatedWorkers.map((w, idx) => ({
+                            worker_id: String(w.id),
+                            worker_code: String(w.id),
+                            full_name: w.name,
+                            role_name: w.role || '現場担当',
+                            color_code: w.color || 'bg-blue-600',
+                            display_order: idx + 1,
+                            is_deleted: false
+                        }));
+                        await supabase.from('workers').upsert(payload);
+                        fetchSupabaseData();
+                    } catch (err) {
+                        console.error('Supabase Save Workers Error:', err);
+                    }
+                }
+                showToast('作業員マスタを更新しました');
+                setIsWorkerMasterOpen(false);
             };
 
             // Filter schedules for current date
@@ -653,11 +697,7 @@
                         <WorkerMasterModal
                             workers={workers}
                             onClose={() => setIsWorkerMasterOpen(false)}
-                            onSave={(updatedWorkers) => {
-                                setWorkers(updatedWorkers);
-                                showToast('作業員マスタを更新しました');
-                                setIsWorkerMasterOpen(false);
-                            }}
+                            onSave={handleSaveWorkersMaster}
                         />
                     )}
 
