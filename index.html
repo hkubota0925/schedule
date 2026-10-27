@@ -71,13 +71,12 @@
 
     <script type="text/babel">
         // =============================================================================
-        //  【Supabase 接続設定箇所】
-        //  コピーした Project URL と Publishable Key (Anon Key) をここに貼り付けてください
+        //  【Supabase 接続設定】（スクショから自動設定済み）
         // =============================================================================
-        const SUPABASE_URL = "https://uahtfbuwzpwguuwgewno.supabase.co"; // 例: "https://uahtfbuwzpwguuwgev.supabase.co"
-        const SUPABASE_ANON_KEY = "sb_publishable_g2E2kWtZYGt_vW4yuFOJMQ_wVeqH9Jz"; // 例: "sb_publishable_g2E..."
+        const SUPABASE_URL = "https://uahtfbuwzpwguuwgevno.supabase.co"; 
+        const SUPABASE_ANON_KEY = "sb_publishable_g2E2kWtZYGt_vw4yuFOJMQ_wVeqH9Jz"; 
 
-        // Initialize Supabase Client if URL/KEY provided
+        // Initialize Supabase Client
         const supabase = (window.supabase && SUPABASE_URL !== "YOUR_SUPABASE_URL_HERE")
             ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
             : null;
@@ -231,42 +230,79 @@
                 return saved ? JSON.parse(saved) : getInitialSchedules();
             });
 
-            // Supabase Sync Effect
-            useEffect(() => {
+            // Supabase Dynamic Sync & Initial Fetch with Auto-Seeding
+            const fetchSupabaseData = async () => {
                 if (!supabase) return;
-                // Fetch Workers from Supabase DB if available
-                supabase.from('workers').select('*').then(({ data, error }) => {
-                    if (!error && data && data.length > 0) {
-                        const formatted = data.map(w => ({
+                try {
+                    // 1. Fetch Workers
+                    const { data: wData, error: wErr } = await supabase.from('workers').select('*');
+                    if (!wErr && wData && wData.length > 0) {
+                        const formattedW = wData.map(w => ({
                             id: w.worker_id || w.id,
                             name: w.full_name || w.name,
                             role: w.role_name || w.role,
                             color: w.color_code || 'bg-blue-600',
                             badgeCls: 'bg-blue-100 text-blue-800'
                         }));
-                        setWorkers(formatted);
+                        setWorkers(formattedW);
+                    } else if (!wErr && (!wData || wData.length === 0)) {
+                        // Seed initial workers if DB is empty
+                        for (const w of INITIAL_WORKERS) {
+                            await supabase.from('workers').upsert({
+                                worker_id: w.id,
+                                worker_code: w.id,
+                                full_name: w.name,
+                                role_name: w.role,
+                                color_code: w.color
+                            });
+                        }
                     }
-                });
 
-                // Fetch Schedules from Supabase DB if available
-                supabase.from('schedules').select('*').eq('is_deleted', false).then(({ data, error }) => {
-                    if (!error && data && data.length > 0) {
-                        const formattedSchedules = data.map(s => ({
-                            id: s.schedule_id || s.id,
+                    // 2. Fetch Schedules
+                    const { data: sData, error: sErr } = await supabase.from('schedules').select('*').eq('is_deleted', false);
+                    if (!sErr && sData && sData.length > 0) {
+                        const formattedS = sData.map(s => ({
+                            id: String(s.schedule_id || s.id),
                             date: s.work_date || s.date,
                             workerId: s.worker_id || s.workerId,
                             startTime: s.start_time ? s.start_time.slice(0, 5) : '08:00',
                             endTime: s.end_time ? s.end_time.slice(0, 5) : '17:00',
                             title: s.title,
-                            location: s.location,
-                            priority: s.priority,
-                            status: s.status,
+                            location: s.location || '',
+                            priority: s.priority || 'medium',
+                            status: s.status || 'not_started',
                             category: s.category || 'work',
-                            notes: s.notes
+                            notes: s.notes || ''
                         }));
-                        setSchedules(formattedSchedules);
+                        setSchedules(formattedS);
+                    } else if (!sErr && (!sData || sData.length === 0)) {
+                        // AUTO-SEED: Send initial sample schedules to Supabase when table is empty
+                        const initSchedules = getInitialSchedules();
+                        for (const s of initSchedules) {
+                            await supabase.from('schedules').upsert({
+                                schedule_id: s.id,
+                                work_date: s.date,
+                                worker_id: s.workerId,
+                                start_time: s.startTime,
+                                end_time: s.endTime,
+                                title: s.title,
+                                location: s.location || '',
+                                priority: s.priority || 'medium',
+                                status: s.status || 'not_started',
+                                category: s.category || 'work',
+                                notes: s.notes || '',
+                                is_deleted: false
+                            });
+                        }
+                        setSchedules(initSchedules);
                     }
-                });
+                } catch (e) {
+                    console.error('Supabase Init Error:', e);
+                }
+            };
+
+            useEffect(() => {
+                fetchSupabaseData();
             }, []);
 
             // Sync to LocalStorage
@@ -297,34 +333,42 @@
                 showToast('ログアウトし、画面をロックしました', 'info');
             };
 
-            // Schedule Operations
+            // Schedule Operations (Local + Supabase Cloud)
             const handleSaveSchedule = async (scheduleData) => {
+                const targetId = scheduleData.id || 's_' + Date.now();
+                const newEntry = { ...scheduleData, id: targetId };
+
                 if (scheduleData.id) {
-                    setSchedules(prev => prev.map(s => s.id === scheduleData.id ? scheduleData : s));
+                    setSchedules(prev => prev.map(s => s.id === scheduleData.id ? newEntry : s));
                     showToast('予定を更新しました');
                 } else {
-                    const newEntry = { ...scheduleData, id: 's_' + Date.now() };
                     setSchedules(prev => [...prev, newEntry]);
                     showToast('新規予定を割り当てました');
                 }
 
-                // If Supabase is configured, sync seamlessly
                 if (supabase) {
                     try {
-                        await supabase.from('schedules').upsert({
-                            schedule_id: scheduleData.id && !scheduleData.id.startsWith('s_') ? scheduleData.id : undefined,
+                        const payload = {
+                            schedule_id: targetId,
                             work_date: scheduleData.date,
                             worker_id: scheduleData.workerId,
                             start_time: scheduleData.startTime,
                             end_time: scheduleData.endTime,
                             title: scheduleData.title,
-                            location: scheduleData.location,
-                            priority: scheduleData.priority,
-                            status: scheduleData.status,
-                            notes: scheduleData.notes
-                        });
+                            location: scheduleData.location || '',
+                            priority: scheduleData.priority || 'medium',
+                            status: scheduleData.status || 'not_started',
+                            notes: scheduleData.notes || '',
+                            is_deleted: false
+                        };
+                        const { error } = await supabase.from('schedules').upsert(payload);
+                        if (error) {
+                            console.error('Supabase Upsert Error:', error);
+                        } else {
+                            fetchSupabaseData();
+                        }
                     } catch (err) {
-                        console.error('Supabase Sync Error:', err);
+                        console.error('Supabase Sync Exception:', err);
                     }
                 }
 
@@ -338,6 +382,7 @@
                 if (supabase) {
                     try {
                         await supabase.from('schedules').update({ is_deleted: true }).eq('schedule_id', id);
+                        fetchSupabaseData();
                     } catch (err) {
                         console.error('Supabase Delete Sync Error:', err);
                     }
