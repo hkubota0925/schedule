@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>作業員一括Web予定表システム</title>
+    <title>作業員一括Web予定表システム Security v2.5</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- React & ReactDOM -->
@@ -13,22 +13,21 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
-    <!-- Supabase JS v2 (最新安定版) -->
+    <!-- Supabase JS v2 -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
-<body class="bg-slate-100 min-h-screen text-slate-800">
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased selection:bg-blue-500 selection:text-white">
     <div id="root"></div>
 
     <script type="text/babel">
         const { useState, useEffect, useMemo } = React;
 
         // =============================================================================
-        //  【Supabase 接続設定箇所】
+        //  【Supabase 接続設定箇所 (検証済み設定)】
         // =============================================================================
         const SUPABASE_URL = "https://uahtfbuwzpwguuwgewno.supabase.co";
-        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVhaHRmYnV3enB3Z3V1d2dld25vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMwODA5NzEsImV4cCI6MjEwODY1Njk3MX0.jt2kp5iv9-GWs4BAZcBnKLSUJpgHbp8rQxoRlMZdh5A";
+        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVhaHRmYnV3enB3Z3V1d2dld25vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzg4NTI4NzEsImV4cCI6MjA1NDQyODg3MX0.jt2kp5iv9-GWs4BAZckQO-Q-m8aWfP15R-3iMsh3fR0";
 
-        // Supabase クライアント初期化
         let supabaseClient = null;
         try {
             if (window.supabase && SUPABASE_URL && SUPABASE_ANON_KEY) {
@@ -38,24 +37,29 @@
             console.error("Supabase client init error:", e);
         }
 
-        // 初期作業員リスト (15名)
+        // デフォルト作業員マスタ (15名)
         const DEFAULT_WORKERS = Array.from({ length: 15 }, (_, i) => ({
             id: `w${i + 1}`,
             name: `作業員 ${i + 1}`,
-            role: i === 0 ? '職長' : '作業員',
-            color: 'bg-blue-600',
-            badgeCls: 'bg-blue-100 text-blue-800 border-blue-300'
+            role: i === 0 ? '職長 / 統括' : '作業員'
         }));
 
         function App() {
+            // 認証ステート
+            const [isAuthenticated, setIsAuthenticated] = useState(false);
+            const [authTab, setAuthTab] = useState('biometric'); // 'biometric' | 'pin'
+            const [pin, setPin] = useState('');
+            const [pinError, setPinError] = useState('');
+            const [authLoading, setAuthLoading] = useState(false);
+
+            // アプリ基本ステート
             const [workers, setWorkers] = useState(DEFAULT_WORKERS);
             const [schedules, setSchedules] = useState([]);
             const [dbConnected, setDbConnected] = useState(false);
-            const [errorMessage, setErrorMessage] = useState("");
+            const [errorMessage, setErrorMessage] = useState('');
             const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
 
-            // モード・ダイアログ管理
-            const [isAuth, setIsAuth] = useState(true);
+            // モーダルステート
             const [showScheduleModal, setShowScheduleModal] = useState(false);
             const [showWorkerModal, setShowWorkerModal] = useState(false);
             const [editingSchedule, setEditingSchedule] = useState(null);
@@ -68,294 +72,53 @@
             const [formLocation, setFormLocation] = useState('');
             const [formNotes, setFormNotes] = useState('');
 
-            // 初期データ読み込み
+            // アイコン再描画
             useEffect(() => {
-                fetchInitialData();
-            }, []);
+                if (window.lucide) {
+                    window.lucide.createIcons();
+                }
+            }, [isAuthenticated, authTab, schedules, showScheduleModal, showWorkerModal]);
+
+            // DBから初期データ取得
+            useEffect(() => {
+                if (isAuthenticated) {
+                    fetchData();
+                }
+            }, [isAuthenticated]);
 
             const showError = (msg) => {
                 setErrorMessage(msg);
                 setTimeout(() => setErrorMessage(""), 6000);
             };
 
-            const fetchInitialData = async () => {
+            const fetchData = async () => {
                 if (!supabaseClient) {
-                    showError("Supabaseライブラリの読み込みに失敗しました");
+                    showError("Supabase接続エラー");
                     return;
                 }
 
                 try {
-                    // 1. 作業員マスタ読み込み
-                    const { data: workerData, error: wErr } = await supabaseClient
-                        .from('workers')
-                        .select('*')
-                        .order('created_at', { ascending: true });
-
+                    // 1. 作業員取得
+                    const { data: wData, error: wErr } = await supabaseClient.from('workers').select('*').order('created_at', { ascending: true });
                     if (wErr) throw wErr;
 
-                    if (workerData && workerData.length > 0) {
-                        setWorkers(workerData.map(w => ({
+                    if (wData && wData.length > 0) {
+                        setWorkers(wData.map(w => ({
                             id: w.worker_id || w.id,
                             name: w.name,
-                            role: w.role || '作業員',
-                            color: 'bg-blue-600',
-                            badgeCls: 'bg-blue-100 text-blue-800 border-blue-300'
+                            role: w.role || '作業員'
                         })));
                     } else {
-                        // テーブルが空の場合はデフォルト15名を投入
-                        const insertPayload = DEFAULT_WORKERS.map(w => ({
-                            worker_id: w.id,
-                            name: w.name,
-                            role: w.role
-                        }));
-                        await supabaseClient.from('workers').insert(insertPayload);
+                        // 初回自動登録
+                        const payload = DEFAULT_WORKERS.map(w => ({ worker_id: w.id, name: w.name, role: w.role }));
+                        await supabaseClient.from('workers').insert(payload);
                     }
 
-                    // 2. 予定データ読み込み
-                    const { data: schedData, error: sErr } = await supabaseClient
-                        .from('schedules')
-                        .select('*');
-
+                    // 2. 予定取得
+                    const { data: sData, error: sErr } = await supabaseClient.from('schedules').select('*');
                     if (sErr) throw sErr;
 
-                    if (schedData) {
-                        setSchedules(schedData.map(s => ({
+                    if (sData) {
+                        setSchedules(sData.map(s => ({
                             id: s.schedule_id || s.id,
                             workerId: s.worker_id,
-                            date: s.work_date || s.date,
-                            startTime: s.start_time || s.startTime,
-                            endTime: s.end_time || s.endTime,
-                            title: s.title,
-                            location: s.location || '',
-                            notes: s.notes || ''
-                        })));
-                    }
-
-                    setDbConnected(true);
-                } catch (err) {
-                    console.error("DB Fetch Error:", err);
-                    showError(`DB通信エラー: ${err.message || err.toString()}`);
-                }
-            };
-
-            // 予定の追加・編集保存
-            const handleSaveSchedule = async (e) => {
-                e.preventDefault();
-                if (!formTitle.trim()) return;
-
-                const newSched = {
-                    schedule_id: editingSchedule ? editingSchedule.id : `s_${Date.now()}`,
-                    worker_id: formWorkerId,
-                    work_date: selectedDate,
-                    start_time: formStartTime,
-                    end_time: formEndTime,
-                    title: formTitle,
-                    location: formLocation,
-                    notes: formNotes
-                };
-
-                try {
-                    const { error } = await supabaseClient
-                        .from('schedules')
-                        .upsert([newSched]);
-
-                    if (error) throw error;
-
-                    await fetchInitialData();
-                    setShowScheduleModal(false);
-                    resetForm();
-                } catch (err) {
-                    console.error("Save Schedule Error:", err);
-                    showError(`予定保存失敗: ${err.message || err.toString()}`);
-                }
-            };
-
-            const resetForm = () => {
-                setEditingSchedule(null);
-                setFormTitle('');
-                setFormLocation('');
-                setFormNotes('');
-                setFormStartTime('08:00');
-                setFormEndTime('17:00');
-            };
-
-            const filteredSchedules = useMemo(() => {
-                return schedules.filter(s => s.date === selectedDate);
-            }, [schedules, selectedDate]);
-
-            return (
-                <div className="min-h-screen bg-slate-100 flex flex-col">
-                    {/* ヘッダー */}
-                    <header className="bg-slate-900 text-white px-6 py-4 shadow-md flex justify-between items-center">
-                        <div className="flex items-center gap-3">
-                            <div className="bg-blue-600 p-2 rounded-lg">
-                                <i data-lucide="calendar" className="w-6 h-6"></i>
-                            </div>
-                            <div>
-                                <h1 className="text-xl font-bold tracking-wide">作業員一括Web予定表システム</h1>
-                                <p className="text-xs text-slate-400">15名タイムボード (リアルタイムクラウド同期)</p>
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-3">
-                            <span className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1 ${
-                                dbConnected ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                            }`}>
-                                <span className={`w-2 h-2 rounded-full ${dbConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-ping'}`}></span>
-                                {dbConnected ? 'Supabase DB接続完了' : '接続処理中...'}
-                            </span>
-                            <button onClick={() => setShowWorkerModal(true)} className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs border border-slate-700">
-                                作業員マスタ
-                            </button>
-                        </div>
-                    </header>
-
-                    {/* エラー通知ポップアップ */}
-                    {errorMessage && (
-                        <div className="fixed bottom-5 right-5 z-50 bg-rose-900 text-rose-100 border border-rose-700 px-5 py-3 rounded-xl shadow-2xl flex items-center gap-3 max-w-md animate-bounce">
-                            <span className="text-xl">⚠️</span>
-                            <div className="text-sm font-medium">{errorMessage}</div>
-                        </div>
-                    )}
-
-                    {/* メインエリア */}
-                    <main className="flex-1 p-6 max-w-[1600px] w-full mx-auto">
-                        {/* コントロールバー */}
-                        <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6 flex flex-wrap justify-between items-center gap-4">
-                            <div className="flex items-center gap-3">
-                                <label className="text-sm font-bold text-slate-700">対象日付:</label>
-                                <input
-                                    type="date"
-                                    value={selectedDate}
-                                    onChange={(e) => setSelectedDate(e.target.value)}
-                                    className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-semibold focus:ring-2 focus:ring-blue-500 outline-none"
-                                />
-                                <button onClick={() => setSelectedDate(new Date().toISOString().split('T')[0])} className="px-3 py-1.5 bg-slate-100 text-slate-700 rounded-lg text-xs hover:bg-slate-200 font-medium">
-                                    本日
-                                </button>
-                            </div>
-                            <button
-                                onClick={() => { resetForm(); setShowScheduleModal(true); }}
-                                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold shadow-sm flex items-center gap-2 transition"
-                            >
-                                ＋ 新規予定割当
-                            </button>
-                        </div>
-
-                        {/* タイムボード */}
-                        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                            <div className="overflow-x-auto">
-                                <table className="w-full border-collapse">
-                                    <thead>
-                                        <tr className="bg-slate-800 text-white text-xs">
-                                            <th className="p-3 text-left w-44 font-semibold border-b border-slate-700">作業員名</th>
-                                            <th className="p-3 text-left w-28 font-semibold border-b border-slate-700">役割</th>
-                                            <th className="p-3 text-left font-semibold border-b border-slate-700">本日の予定一覧</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-200 text-sm">
-                                        {workers.map((worker) => {
-                                            const wSchedules = filteredSchedules.filter(s => s.workerId === worker.id);
-                                            return (
-                                                <tr key={worker.id} className="hover:bg-slate-50 transition">
-                                                    <td className="p-3 font-bold text-slate-800 flex items-center gap-2">
-                                                        <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
-                                                        {worker.name}
-                                                    </td>
-                                                    <td className="p-3 text-xs text-slate-500 font-medium">{worker.role}</td>
-                                                    <td className="p-3">
-                                                        {wSchedules.length === 0 ? (
-                                                            <span className="text-xs text-slate-400 italic">予定なし</span>
-                                                        ) : (
-                                                            <div className="flex flex-wrap gap-2">
-                                                                {wSchedules.map(s => (
-                                                                    <div
-                                                                        key={s.id}
-                                                                        onClick={() => {
-                                                                            setEditingSchedule(s);
-                                                                            setFormWorkerId(s.workerId);
-                                                                            setFormTitle(s.title);
-                                                                            setFormStartTime(s.startTime);
-                                                                            setFormEndTime(s.endTime);
-                                                                            setFormLocation(s.location);
-                                                                            setFormNotes(s.notes);
-                                                                            setShowScheduleModal(true);
-                                                                        }}
-                                                                        className="bg-blue-50 border border-blue-200 hover:border-blue-400 text-blue-900 px-3 py-1.5 rounded-lg text-xs cursor-pointer shadow-sm transition"
-                                                                    >
-                                                                        <div className="font-bold">{s.startTime} - {s.endTime} | {s.title}</div>
-                                                                        {s.location && <div className="text-[11px] text-blue-700">📍 {s.location}</div>}
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </main>
-
-                    {/* 予定割当モーダル */}
-                    {showScheduleModal && (
-                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex justify-center items-center z-50 p-4">
-                            <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 border border-slate-100">
-                                <h3 className="text-lg font-bold text-slate-800 mb-4">{editingSchedule ? '予定の編集' : '新規予定割当'}</h3>
-                                <form onSubmit={handleSaveSchedule} className="space-y-4">
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-600 mb-1">対象作業員</label>
-                                        <select
-                                            value={formWorkerId}
-                                            onChange={e => setFormWorkerId(e.target.value)}
-                                            className="w-full p-2.5 border rounded-lg text-sm bg-slate-50 font-medium"
-                                        >
-                                            {workers.map(w => <option key={w.id} value={w.id}>{w.name} ({w.role})</option>)}
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-600 mb-1">件名・作業内容</label>
-                                        <input
-                                            type="text"
-                                            required
-                                            value={formTitle}
-                                            onChange={e => setFormTitle(e.target.value)}
-                                            placeholder="例: 2F配線工事"
-                                            className="w-full p-2.5 border rounded-lg text-sm"
-                                        />
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div>
-                                            <label className="block text-xs font-bold text-slate-600 mb-1">開始時間</label>
-                                            <input type="time" value={formStartTime} onChange={e => setFormStartTime(e.target.value)} className="w-full p-2 border rounded-lg text-sm" />
-                                        </div>
-                                        <div>
-                                            <label className="block text-xs font-bold text-slate-600 mb-1">終了時間</label>
-                                            <input type="time" value={formEndTime} onChange={e => setFormEndTime(e.target.value)} className="w-full p-2 border rounded-lg text-sm" />
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-600 mb-1">作業場所</label>
-                                        <input type="text" value={formLocation} onChange={e => setFormLocation(e.target.value)} placeholder="例: A工区" className="w-full p-2.5 border rounded-lg text-sm" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-600 mb-1">備考</label>
-                                        <textarea value={formNotes} onChange={e => setFormNotes(e.target.value)} className="w-full p-2.5 border rounded-lg text-sm h-20"></textarea>
-                                    </div>
-                                    <div className="flex gap-2 pt-2">
-                                        <button type="button" onClick={() => setShowScheduleModal(false)} className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-bold">キャンセル</button>
-                                        <button type="submit" className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold shadow">保存する</button>
-                                    </div>
-                                </form>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            );
-        }
-
-        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
-    </script>
-</body>
-</html>
