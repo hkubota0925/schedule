@@ -71,7 +71,7 @@
 
     <script type="text/babel">
         // =============================================================================
-        //  【Supabase 接続設定】（スクショから自動設定済み）
+        //  【Supabase 接続設定】
         // =============================================================================
         const SUPABASE_URL = "https://uahtfbuwzpwguuwgevno.supabase.co"; 
         const SUPABASE_ANON_KEY = "sb_publishable_g2E2kWtZYGt_vw4yuFOJMQ_wVeqH9Jz"; 
@@ -150,44 +150,14 @@
             '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00'
         ];
 
-        // --- INITIAL MASTER WORKERS (15 WORKERS DEFAULT) ---
-        const INITIAL_WORKERS = [
-            { id: 'w1', name: '山田 太郎', role: '職長 / 統括', color: 'bg-blue-600', badgeCls: 'bg-blue-100 text-blue-800 border-blue-300' },
-            { id: 'w2', name: '佐藤 花子', role: '電気設備主任', color: 'bg-indigo-600', badgeCls: 'bg-indigo-100 text-indigo-800 border-indigo-300' },
-            { id: 'w3', name: '鈴木 一郎', role: '配管・空調', color: 'bg-emerald-600', badgeCls: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
-            { id: 'w4', name: '高橋 健太', role: '安全管理担当', color: 'bg-amber-600', badgeCls: 'bg-amber-100 text-amber-800 border-amber-300' },
-            { id: 'w5', name: '田中 誠', role: '内装・大工', color: 'bg-rose-600', badgeCls: 'bg-rose-100 text-rose-800 border-rose-300' },
-            { id: 'w6', name: '伊藤 恵', role: '設計・CAD', color: 'bg-purple-600', badgeCls: 'bg-purple-100 text-purple-800 border-purple-300' },
-            { id: 'w7', name: '渡辺 隆', role: '重機オペレーター', color: 'bg-cyan-600', badgeCls: 'bg-cyan-100 text-cyan-800 border-cyan-300' },
-            { id: 'w8', name: '中村 翼', role: '溶接・鍛治', color: 'bg-teal-600', badgeCls: 'bg-teal-100 text-teal-800 border-teal-300' },
-            { id: 'w9', name: '小林 拓也', role: '塗装・防水', color: 'bg-orange-600', badgeCls: 'bg-orange-100 text-orange-800 border-orange-300' },
-            { id: 'w10', name: '加藤 美咲', role: '現場事務・手配', color: 'bg-pink-600', badgeCls: 'bg-pink-100 text-pink-800 border-pink-300' },
-            { id: 'w11', name: '吉田 勇樹', role: '通信・計装', color: 'bg-sky-600', badgeCls: 'bg-sky-100 text-sky-800 border-sky-300' },
-            { id: 'w12', name: '山口 健二', role: '土木・基礎', color: 'bg-red-600', badgeCls: 'bg-red-100 text-red-800 border-red-300' },
-            { id: 'w13', name: '松本 裕子', role: '品質検査', color: 'bg-violet-600', badgeCls: 'bg-violet-100 text-violet-800 border-violet-300' },
-            { id: 'w14', name: '井上 翔太', role: '電気助勢', color: 'bg-lime-600', badgeCls: 'bg-lime-100 text-lime-800 border-lime-300' },
-            { id: 'w15', name: '木村 卓也', role: '施工管理補佐', color: 'bg-slate-700', badgeCls: 'bg-slate-200 text-slate-800 border-slate-400' }
-        ];
-
-        // Sample Schedules Initial Setup
-        const getInitialSchedules = () => {
-            const today = getTodayString();
-            const tomorrow = addDaysStr(today, 1);
-            return [
-                { id: 's1', date: today, workerId: 'w1', startTime: '08:00', endTime: '09:30', title: '全体朝礼・KYミーティング', location: '朝礼広場', priority: 'high', status: 'completed', category: 'work', notes: '安全注意事項の周知' },
-                { id: 's2', date: today, workerId: 'w1', startTime: '10:00', endTime: '12:00', title: '元請・施主定例会議', location: '現地現場事務所', priority: 'high', status: 'in_progress', category: 'work', notes: '工程表の変更について打合せ' },
-                { id: 's3', date: today, workerId: 'w2', startTime: '09:00', endTime: '12:00', title: '2F高圧配線引き込み工程', location: '2F 電気室', priority: 'high', status: 'in_progress', category: 'work', notes: '絶縁手袋着用徹底' },
-                { id: 's4', date: today, workerId: 'w2', startTime: '13:00', endTime: '16:00', title: '分電盤結線および動作試験', location: '2F A区画', priority: 'medium', status: 'not_started', category: 'work', notes: '' },
-                { id: 's5', date: today, workerId: 'w3', startTime: '09:00', endTime: '11:30', title: '1F給排水管圧送テスト', location: '1F ピット', priority: 'medium', status: 'completed', category: 'work', notes: '漏水チェックOK' },
-                { id: 's6', date: today, workerId: 'w4', startTime: '08:30', endTime: '12:00', title: '足場組立て現場・安全巡視', location: '外周足場', priority: 'high', status: 'completed', category: 'work', notes: '手すり先行工法の確認' },
-                { id: 's7', date: today, workerId: 'w5', startTime: '10:00', endTime: '15:00', title: '3F軽鉄下地およびボード貼り', location: '3F 事務所棟', priority: 'medium', status: 'in_progress', category: 'work', notes: '' },
-                { id: 's8', date: today, workerId: 'w7', startTime: '09:00', endTime: '12:00', title: '25tクレーン荷揚げ揚重作業', location: '東側搬入口', priority: 'high', status: 'in_progress', category: 'facility', notes: '合図者の配置必須' },
-                { id: 's9', date: today, workerId: 'w8', startTime: '13:00', endTime: '17:00', title: '鉄骨ジョイント部超音波溶接', location: '屋上階', priority: 'high', status: 'not_started', category: 'work', notes: '' },
-                { id: 's10', date: today, workerId: 'w10', startTime: '09:00', endTime: '17:00', title: '搬入伝票整理・警備員配置調整', location: '事務所デスク', priority: 'low', status: 'in_progress', category: 'staff', notes: '' },
-                { id: 's11', date: today, workerId: 'w11', startTime: '13:30', endTime: '16:30', title: 'LAN配線・光ファイバー融着作業', location: 'MDF室', priority: 'medium', status: 'not_started', category: 'work', notes: '' },
-                { id: 's12', date: tomorrow, workerId: 'w1', startTime: '09:00', endTime: '12:00', title: '中間構造検査立ち合い', location: '全区画', priority: 'high', status: 'not_started', category: 'work', notes: '' }
-            ];
-        };
+        // --- DEFAULT WORKER MASTER PLACEHOLDERS ---
+        const INITIAL_WORKERS = Array.from({ length: 15 }, (_, i) => ({
+            id: `w${i + 1}`,
+            name: `作業員 ${i + 1}`,
+            role: '現場担当',
+            color: 'bg-blue-600',
+            badgeCls: 'bg-blue-100 text-blue-800 border-blue-300'
+        }));
 
         // --- MAIN APP COMPONENT ---
         function App() {
@@ -207,7 +177,7 @@
 
             // Active View & Date State
             const [selectedDate, setSelectedDate] = useState(getTodayString());
-            const [currentView, setCurrentView] = useState('timeline'); // 'timeline' | 'matrix' | 'table' | 'analytics'
+            const [currentView, setCurrentView] = useState('timeline');
             const [density, setDensity] = useState('compact');
             const [searchQuery, setSearchQuery] = useState('');
 
@@ -227,10 +197,10 @@
 
             const [schedules, setSchedules] = useState(() => {
                 const saved = localStorage.getItem('app_schedules_master');
-                return saved ? JSON.parse(saved) : getInitialSchedules();
+                return saved ? JSON.parse(saved) : [];
             });
 
-            // Supabase Dynamic Sync & Initial Fetch with Auto-Seeding
+            // Supabase Dynamic Sync
             const fetchSupabaseData = async () => {
                 if (!supabase) return;
                 try {
@@ -245,22 +215,11 @@
                             badgeCls: 'bg-blue-100 text-blue-800'
                         }));
                         setWorkers(formattedW);
-                    } else if (!wErr && (!wData || wData.length === 0)) {
-                        // Seed initial workers if DB is empty
-                        for (const w of INITIAL_WORKERS) {
-                            await supabase.from('workers').upsert({
-                                worker_id: w.id,
-                                worker_code: w.id,
-                                full_name: w.name,
-                                role_name: w.role,
-                                color_code: w.color
-                            });
-                        }
                     }
 
                     // 2. Fetch Schedules
                     const { data: sData, error: sErr } = await supabase.from('schedules').select('*').eq('is_deleted', false);
-                    if (!sErr && sData && sData.length > 0) {
+                    if (!sErr && sData) {
                         const formattedS = sData.map(s => ({
                             id: String(s.schedule_id || s.id),
                             date: s.work_date || s.date,
@@ -275,26 +234,6 @@
                             notes: s.notes || ''
                         }));
                         setSchedules(formattedS);
-                    } else if (!sErr && (!sData || sData.length === 0)) {
-                        // AUTO-SEED: Send initial sample schedules to Supabase when table is empty
-                        const initSchedules = getInitialSchedules();
-                        for (const s of initSchedules) {
-                            await supabase.from('schedules').upsert({
-                                schedule_id: s.id,
-                                work_date: s.date,
-                                worker_id: s.workerId,
-                                start_time: s.startTime,
-                                end_time: s.endTime,
-                                title: s.title,
-                                location: s.location || '',
-                                priority: s.priority || 'medium',
-                                status: s.status || 'not_started',
-                                category: s.category || 'work',
-                                notes: s.notes || '',
-                                is_deleted: false
-                            });
-                        }
-                        setSchedules(initSchedules);
                     }
                 } catch (e) {
                     console.error('Supabase Init Error:', e);
@@ -457,11 +396,11 @@
                                         ) : (
                                             <span className="text-xs bg-amber-500/20 text-amber-300 font-normal px-2.5 py-0.5 rounded-full border border-amber-500/40 flex items-center gap-1">
                                                 <Icon name="shield" className="w-3.5 h-3.5 text-amber-400" />
-                                                ローカル保存モード (15名一括)
+                                                ローカル保存モード
                                             </span>
                                         )}
                                     </h1>
-                                    <p className="text-[11px] text-slate-400">全作業員の予定データを無期限で保存・管理します</p>
+                                    <p className="text-[11px] text-slate-400">全作業員の予定データをリアルタイムで同期・保存します</p>
                                 </div>
                             </div>
 
@@ -581,7 +520,7 @@
                                         }`}
                                     >
                                         <Icon name="users" className="w-3.5 h-3.5" />
-                                        15名一括ボード
+                                        一括ボード
                                     </button>
                                     <button
                                         onClick={() => setCurrentView('matrix')}
@@ -977,7 +916,7 @@
                         )}
 
                         <div className="mt-6 pt-4 border-t border-slate-800 text-center text-[11px] text-slate-500">
-                            作業員一括管理システム (15名対応) Security v2.5
+                            作業員一括管理システム Security v2.5
                         </div>
                     </div>
                 </div>
@@ -1220,7 +1159,7 @@
                             {filtered.length === 0 ? (
                                 <tr>
                                     <td colSpan="7" className="p-8 text-center text-slate-400 font-bold">
-                                        該当する予定はありません
+                                        登録された予定はありません
                                     </td>
                                 </tr>
                             ) : (
@@ -1498,7 +1437,7 @@
 
             const handleAdd = () => {
                 const newId = 'w_' + Date.now();
-                setList([...list, { id: newId, name: '新規 作業員', role: '一般作業員', color: 'bg-slate-600', badgeCls: 'bg-slate-100 text-slate-800' }]);
+                setList([...list, { id: newId, name: '新規 作業員', role: '現場担当', color: 'bg-slate-600', badgeCls: 'bg-slate-100 text-slate-800' }]);
             };
 
             const handleChange = (id, field, value) => {
