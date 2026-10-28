@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>作業員別 一括Web予定表管理システム (Supabase連携・生体認証・一括コピー対応)</title>
+    <title>作業員別 一括Web予定表管理システム (Supabase連携・パスキー対応)</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -90,6 +90,21 @@
             : null;
 
         const { useState, useEffect, useMemo, useRef } = React;
+
+        // --- Helper: ArrayBuffer Base64 Conversion ---
+        const bufferToBase64 = (buf) => {
+            const binStr = String.fromCharCode(...new Uint8Array(buf));
+            return btoa(binStr).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        };
+
+        const base64ToBuffer = (base64) => {
+            const pad = '='.repeat((4 - base64.length % 4) % 4);
+            const base64Clean = (base64 + pad).replace(/-/g, '+').replace(/_/g, '/');
+            const raw = atob(base64Clean);
+            const buf = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+            return buf.buffer;
+        };
 
         // --- SVG Icon Component ---
         const Icon = ({ name, className = "w-4 h-4" }) => {
@@ -340,7 +355,7 @@
                 sessionStorage.setItem('app_is_authenticated', isAuthenticated ? 'true' : 'false');
             }, [isAuthenticated]);
 
-            // --- KEYBOARD SHORTCUTS FOR COPY, PASTE, DELETE & UNDO (Ctrl+C / Ctrl+V / Delete / Ctrl+Z) ---
+            // --- KEYBOARD SHORTCUTS (Ctrl+C / Ctrl+V / Delete / Ctrl+Z) ---
             useEffect(() => {
                 const handleKeyDown = (e) => {
                     const activeElement = document.activeElement;
@@ -351,21 +366,21 @@
 
                     const isCmdOrCtrl = e.metaKey || e.ctrlKey;
 
-                    // Ctrl + Z: Undo (元に戻す)
+                    // Ctrl + Z: Undo
                     if (isCmdOrCtrl && e.key.toLowerCase() === 'z') {
                         e.preventDefault();
                         handleUndo();
                         return;
                     }
 
-                    // Delete / Backspace: 選択した予定の削除
+                    // Delete / Backspace
                     if ((e.key === 'Delete' || e.key === 'Backspace') && selectedScheduleId) {
                         e.preventDefault();
                         handleDeleteSchedule(selectedScheduleId);
                         return;
                     }
 
-                    // Ctrl + C: コピー
+                    // Ctrl + C
                     if (isCmdOrCtrl && e.key.toLowerCase() === 'c') {
                         if (selectedScheduleId) {
                             const target = schedules.find(s => s.id === selectedScheduleId);
@@ -377,7 +392,7 @@
                         }
                     }
 
-                    // Ctrl + V: 貼り付け
+                    // Ctrl + V
                     if (isCmdOrCtrl && e.key.toLowerCase() === 'v') {
                         if (copiedSchedule && activeCell) {
                             e.preventDefault();
@@ -387,7 +402,7 @@
                         }
                     }
 
-                    // Escape: 選択解除
+                    // Escape
                     if (e.key === 'Escape') {
                         setSelectedScheduleId(null);
                         setActiveCell(null);
@@ -409,7 +424,6 @@
                 setHistoryStack(prev => prev.slice(0, prev.length - 1));
 
                 if (lastAction.type === 'ADD') {
-                    // Undo an ADD operation: delete the added schedules
                     const removeIds = new Set(lastAction.addedSchedules.map(s => s.id));
                     setSchedules(prev => prev.filter(s => !removeIds.has(s.id)));
                     setSelectedScheduleId(null);
@@ -427,7 +441,6 @@
                         }
                     }
                 } else if (lastAction.type === 'UPDATE') {
-                    // Undo an UPDATE operation: restore previous schedule
                     const prev = lastAction.prevSchedule;
                     setSchedules(prevList => prevList.map(s => s.id === prev.id ? prev : s));
 
@@ -454,7 +467,6 @@
                         }
                     }
                 } else if (lastAction.type === 'DELETE') {
-                    // Undo a DELETE operation: restore deleted schedules
                     const restoreList = lastAction.deletedSchedules;
                     setSchedules(prevList => {
                         let updated = [...prevList];
@@ -498,7 +510,7 @@
                 showToast('ログアウトし、画面をロックしました', 'info');
             };
 
-            // Single & Multi-Worker Schedule Save (Supports Multiple Workers At Once & Undo)
+            // Save Schedule Action
             const handleSaveSchedule = async (scheduleData, targetWorkerIds = []) => {
                 const workerList = (targetWorkerIds && targetWorkerIds.length > 0) 
                     ? targetWorkerIds 
@@ -518,14 +530,12 @@
                     };
                 });
 
-                // Save action to history stack for Undo
                 if (isUpdate && previousSchedule && workerList.length === 1) {
                     setHistoryStack(prev => [...prev.slice(-29), { type: 'UPDATE', prevSchedule: previousSchedule, newSchedule: newEntries[0] }]);
                 } else {
                     setHistoryStack(prev => [...prev.slice(-29), { type: 'ADD', addedSchedules: newEntries }]);
                 }
 
-                // Update Local UI
                 setSchedules(prev => {
                     let updated = [...prev];
                     newEntries.forEach(entry => {
@@ -539,7 +549,6 @@
                     return updated;
                 });
 
-                // Supabase Persistence
                 if (supabase) {
                     try {
                         const dbPayloads = newEntries.map(entry => ({
@@ -562,7 +571,7 @@
                             console.error('Supabase Upsert Error:', error);
                             showToast(`保存エラー: ${error.message}`, 'error');
                         } else {
-                            showToast(`${newEntries.length}件の予定をSupabaseへ保存しました！ (Ctrl+Zで元に戻せます)`);
+                            showToast(`${newEntries.length}件の予定をSupabaseへ保存しました！`);
                             fetchSupabaseData();
                         }
                     } catch (err) {
@@ -577,7 +586,7 @@
                 setEditingSchedule(null);
             };
 
-            // Direct Copy & Paste Helper (Supports Undo)
+            // Copy & Paste Schedule
             const handlePasteSchedule = async (sourceSchedule, targetWorkerId, targetTimeSlot) => {
                 if (!sourceSchedule) return;
                 const duration = getDurationMinutes(sourceSchedule.startTime, sourceSchedule.endTime);
@@ -591,16 +600,14 @@
                     workerId: String(targetWorkerId),
                     startTime: targetTimeSlot,
                     endTime: newEndTime,
-                    status: 'not_started' // Copied entries start fresh
+                    status: 'not_started'
                 };
 
-                // Push to history for Undo
                 setHistoryStack(prev => [...prev.slice(-29), { type: 'ADD', addedSchedules: [pastedEntry] }]);
-
                 setSchedules(prev => [...prev, pastedEntry]);
 
                 const targetWorker = workers.find(w => String(w.id) === String(targetWorkerId));
-                showToast(`作業員「${targetWorker?.name || targetWorkerId}」に「${sourceSchedule.title}」を貼り付けました (Ctrl+Zで元に戻せます)`);
+                showToast(`作業員「${targetWorker?.name || targetWorkerId}」に「${sourceSchedule.title}」を貼り付けました`);
 
                 if (supabase) {
                     try {
@@ -627,13 +634,11 @@
                 const target = schedules.find(s => s.id === id);
                 if (!target) return;
 
-                // Push to history stack for Undo
                 setHistoryStack(prev => [...prev.slice(-29), { type: 'DELETE', deletedSchedules: [target] }]);
-
                 setSchedules(prev => prev.filter(s => s.id !== id));
                 if (selectedScheduleId === id) setSelectedScheduleId(null);
 
-                showToast(`予定「${target.title}」を削除しました (Ctrl+Zで元に戻せます)`);
+                showToast(`予定「${target.title}」を削除しました`);
 
                 if (supabase) {
                     try {
@@ -680,12 +685,10 @@
                 setIsWorkerMasterOpen(false);
             };
 
-            // Filter schedules for current date
             const currentDaySchedules = useMemo(() => {
                 return schedules.filter(s => s.date === selectedDate);
             }, [schedules, selectedDate]);
 
-            // Conflict warning map for active date
             const conflictsMap = useMemo(() => {
                 const map = {};
                 workers.forEach(w => {
@@ -710,6 +713,7 @@
                 return (
                     <AuthScreen
                         authSettings={authSettings}
+                        showToast={showToast}
                         onSuccess={() => {
                             setIsAuthenticated(true);
                             showToast('本人認証に成功しました');
@@ -730,7 +734,7 @@
                         </div>
                     )}
 
-                    {/* --- FLOATING CLIPBOARD / SELECTION TOOLBAR --- */}
+                    {/* --- FLOATING CLIPBOARD TOOLBAR --- */}
                     {copiedSchedule && (
                         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 border border-brand-500/80 text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3.5 text-xs backdrop-blur-md animate-in slide-in-from-bottom duration-200">
                             <div className="flex items-center gap-2">
@@ -739,13 +743,11 @@
                                 <div>
                                     <span className="text-slate-400 text-[11px]">コピー中: </span>
                                     <span className="font-bold text-brand-200">「{copiedSchedule.title}」</span>
-                                    <span className="text-[10px] text-slate-400 ml-1 font-mono">({copiedSchedule.startTime}~{copiedSchedule.endTime})</span>
                                 </div>
                             </div>
-
                             <div className="flex items-center gap-2 border-l border-slate-700 pl-3">
                                 <span className="hidden sm:inline-block text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded font-mono border border-slate-700">
-                                    セル選択 + Ctrl+V または クリック貼り付け
+                                    セル選択 + Ctrl+V
                                 </span>
                                 <button
                                     onClick={() => setCopiedSchedule(null)}
@@ -757,7 +759,7 @@
                         </div>
                     )}
 
-                    {/* FLOATING ACTION TOOLBAR FOR SELECTED SCHEDULE (WHEN NO COPY IN BUFFER) */}
+                    {/* FLOATING ACTION TOOLBAR FOR SELECTED SCHEDULE */}
                     {selectedScheduleId && !copiedSchedule && (
                         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 border border-amber-500/80 text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3 text-xs backdrop-blur-md animate-in slide-in-from-bottom duration-200">
                             <div className="flex items-center gap-2">
@@ -772,7 +774,7 @@
                                         const target = schedules.find(s => s.id === selectedScheduleId);
                                         if (target) {
                                             setCopiedSchedule(target);
-                                            showToast(`「${target.title}」をコピーしました。(Ctrl+V で貼り付け)`, 'info');
+                                            showToast(`「${target.title}」をコピーしました。`, 'info');
                                         }
                                     }}
                                     className="px-2.5 py-1 bg-brand-600 hover:bg-brand-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 shadow-xs"
@@ -819,7 +821,7 @@
                                             </span>
                                         )}
                                     </h1>
-                                    <p className="text-[11px] text-slate-400">予定のクリック選択・Ctrl+C/Vコピー・Delete削除・Ctrl+Z Undoに対応</p>
+                                    <p className="text-[11px] text-slate-400">WebAuthn パスキー生体認証・Ctrl+C/V・Delete・Ctrl+Z Undo完全対応</p>
                                 </div>
                             </div>
 
@@ -861,7 +863,6 @@
                                 <button
                                     onClick={() => fetchSupabaseData()}
                                     className="bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition"
-                                    title="手動でSupabaseの最新データを再取得"
                                 >
                                     <Icon name="database" className="w-4 h-4" />
                                     <span>データ再読み込み</span>
@@ -880,7 +881,7 @@
                                     className="bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition"
                                 >
                                     <Icon name="fingerprint" className="w-4 h-4" />
-                                    <span className="hidden md:inline">認証設定</span>
+                                    <span className="hidden md:inline">認証＆パスキー登録</span>
                                 </button>
 
                                 <button
@@ -1072,6 +1073,7 @@
                     {isSecurityModalOpen && (
                         <SecuritySettingsModal
                             authSettings={authSettings}
+                            showToast={showToast}
                             onClose={() => setIsSecurityModalOpen(false)}
                             onSave={(updated) => {
                                 setAuthSettings(updated);
@@ -1115,8 +1117,8 @@
             );
         }
 
-        // --- AUTHENTICATION SCREEN COMPONENT ---
-        function AuthScreen({ authSettings, onSuccess }) {
+        // --- AUTHENTICATION SCREEN COMPONENT (PASSKEY / WEBAUTHN + PIN + OTP) ---
+        function AuthScreen({ authSettings, showToast, onSuccess }) {
             const [mode, setMode] = useState(authSettings.useBiometrics ? 'biometric' : '2fa');
             const [pinInput, setPinInput] = useState('');
             const [otpInput, setOtpInput] = useState('');
@@ -1125,7 +1127,6 @@
             const [authError, setAuthError] = useState('');
             const [generatedOTP, setGeneratedOTP] = useState('');
             const [otpTimer, setOtpTimer] = useState(60);
-            const [hasPlatformAuth, setHasPlatformAuth] = useState(true);
 
             useEffect(() => {
                 let timer;
@@ -1135,55 +1136,62 @@
                 return () => clearInterval(timer);
             }, [step2FA, otpTimer]);
 
-            // Check if Platform Authenticator (Windows Hello / Touch ID / Face ID) is supported
-            useEffect(() => {
-                if (window.PublicKeyCredential && typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
-                    PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
-                        .then(available => setHasPlatformAuth(available))
-                        .catch(() => setHasPlatformAuth(false));
-                } else {
-                    setHasPlatformAuth(false);
-                }
-            }, []);
-
-            const handleBiometricAuth = async () => {
+            // PASSKEY SIGN-IN (WebAuthn Get)
+            const handlePasskeyAuth = async () => {
                 setIsScanning(true);
                 setAuthError('');
 
                 try {
-                    if (window.PublicKeyCredential && navigator.credentials && navigator.credentials.get) {
-                        const dummyChallenge = new Uint8Array(32);
-                        window.crypto.getRandomValues(dummyChallenge);
-
-                        // authenticatorAttachment: "platform" を指定し、USBセキュリティキー要求ポップアップを回避
-                        await navigator.credentials.get({
-                            publicKey: {
-                                challenge: dummyChallenge,
-                                timeout: 30000,
-                                userVerification: "preferred",
-                                authenticatorSelection: {
-                                    authenticatorAttachment: "platform", // プラットフォーム端末固有の生体認証（Windows Hello, Touch ID, Face ID）のみ指定
-                                    userVerification: "preferred"
-                                }
-                            }
-                        });
+                    if (!window.PublicKeyCredential) {
+                        throw new Error('お使いのブラウザはパスキー（WebAuthn）非対応です。');
                     }
 
-                    setTimeout(() => {
+                    // 1. Check saved passkeys from Supabase worker_passkeys
+                    let passkeyRecords = [];
+                    if (supabase) {
+                        const { data, error } = await supabase.from('worker_passkeys').select('*').limit(20);
+                        if (!error && data) passkeyRecords = data;
+                    }
+
+                    const challenge = new Uint8Array(32);
+                    window.crypto.getRandomValues(challenge);
+
+                    const allowCredentials = passkeyRecords.map(pk => ({
+                        id: base64ToBuffer(pk.credential_id || pk.id),
+                        type: 'public-key'
+                    }));
+
+                    const options = {
+                        publicKey: {
+                            challenge: challenge,
+                            timeout: 60000,
+                            userVerification: "preferred",
+                            authenticatorSelection: {
+                                authenticatorAttachment: "platform"
+                            }
+                        }
+                    };
+
+                    if (allowCredentials.length > 0) {
+                        options.publicKey.allowCredentials = allowCredentials;
+                    }
+
+                    // Call WebAuthn Get Credentials
+                    const assertion = await navigator.credentials.get(options);
+
+                    if (assertion) {
                         setIsScanning(false);
                         onSuccess();
-                    }, 800);
+                    }
                 } catch (err) {
                     setIsScanning(false);
-                    console.warn('WebAuthn Prompt Note:', err);
+                    console.warn('Passkey Auth Note:', err);
                     
                     if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
-                        setAuthError('生体認証（Windows Hello等）がキャンセルされました。右側の「2段階認証 (PIN+OTP)」タブをご利用ください。');
-                    } else if (err.name === 'InvalidStateError' || err.name === 'NotSupportedError') {
-                        setAuthError('お使いの端末に生体認証が設定されていないか、非対応です。PINコード認証をご利用ください。');
+                        setAuthError('パスキー認証がキャンセルされました。PINコード認証でサインインできます。');
                     } else {
-                        // パスキー未登録環境などのフォールバック
-                        setAuthError('生体認証が検出されませんでした。「2段階認証 (PIN+OTP)」に切り替えてログインできます。');
+                        // Fallback: If no passkey registered yet, allow smooth onboarding
+                        setAuthError('登録済みのパスキーが検出されませんでした。「2段階認証 (PIN+OTP)」でログインし、設定からパスキーを登録してください。');
                     }
                 }
             };
@@ -1227,7 +1235,7 @@
                             </div>
                             <h2 className="text-xl font-extrabold tracking-tight">作業員一括Web予定表</h2>
                             <p className="text-xs text-slate-400">
-                                セキュリティ保護されています。<br />生体認証または2段階認証でアクセスしてください。
+                                パスキー（Windows Hello / Face ID / Touch ID）<br />または2段階認証で安全にログインします。
                             </p>
                         </div>
 
@@ -1247,7 +1255,7 @@
                                 }`}
                             >
                                 <Icon name="fingerprint" className="w-4 h-4" />
-                                スマホ生体認証
+                                パキー (生体認証)
                             </button>
                             <button
                                 type="button"
@@ -1263,16 +1271,10 @@
 
                         {mode === 'biometric' && (
                             <div className="text-center space-y-6 py-2">
-                                {!hasPlatformAuth && (
-                                    <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-300 text-[11px] text-left">
-                                        ⚠️ <strong>ご注意:</strong> お使いのPCに Windows Hello (指紋・顔認証) が設定されていない場合、USBキー画面が表示されることがあります。右上の「2段階認証 (PIN+OTP)」をご利用ください。
-                                    </div>
-                                )}
-
                                 <div className="relative inline-flex items-center justify-center">
                                     <button
                                         type="button"
-                                        onClick={handleBiometricAuth}
+                                        onClick={handlePasskeyAuth}
                                         disabled={isScanning}
                                         className={`w-28 h-28 rounded-3xl border-2 flex flex-col items-center justify-center gap-2 transition duration-300 relative overflow-hidden ${
                                             isScanning 
@@ -1282,24 +1284,24 @@
                                     >
                                         <Icon name="fingerprint" className="w-12 h-12" />
                                         <span className="text-[10px] font-extrabold tracking-wider uppercase">
-                                            {isScanning ? '照合中...' : 'Face ID / Touch ID'}
+                                            {isScanning ? '照合中...' : 'Passkey 生体キー'}
                                         </span>
                                     </button>
                                 </div>
 
                                 <div className="space-y-1">
-                                    <p className="text-xs font-bold text-slate-200">画面の生体キーをタップして認証を試行</p>
-                                    <p className="text-[11px] text-slate-400">Windows Hello (顔/指紋) / iOS / Android 対応</p>
+                                    <p className="text-xs font-bold text-slate-200">パスキー認証（Windows Hello / Touch ID）</p>
+                                    <p className="text-[11px] text-slate-400">端末固有のセキュリティキーでパスワードレス検証</p>
                                 </div>
 
                                 <div className="space-y-2">
                                     <button
                                         type="button"
-                                        onClick={handleBiometricAuth}
+                                        onClick={handlePasskeyAuth}
                                         className="w-full py-3 bg-brand-600 hover:bg-brand-500 text-white font-bold rounded-xl text-xs transition shadow-lg flex items-center justify-center gap-2"
                                     >
                                         <Icon name="smartphone" className="w-4 h-4" />
-                                        生体認証 (Windows Hello / スマホ) で開始
+                                        パスキーでサインイン
                                     </button>
                                     
                                     <button
@@ -1393,7 +1395,7 @@
                         )}
 
                         <div className="mt-6 pt-4 border-t border-slate-800 text-center text-[11px] text-slate-500">
-                            作業員一括管理システム Security v2.5
+                            作業員一括管理システム Security v2.5 (Passkey Ready)
                         </div>
                     </div>
                 </div>
@@ -1529,7 +1531,6 @@
                                                                             </div>
                                                                         )}
 
-                                                                        {/* QUICK COPY BUTTON ON HOVER */}
                                                                         <button
                                                                             type="button"
                                                                             onClick={(e) => {
@@ -1546,7 +1547,6 @@
                                                             );
                                                         })}
 
-                                                        {/* PLACEHOLDER WHEN CELL IS CLICKED AND COPY IN BUFFER */}
                                                         {matches.length === 0 && copiedSchedule && isCellActive && (
                                                             <div className="w-full h-full flex items-center justify-center text-[9px] text-brand-600 font-bold bg-brand-50 rounded border border-brand-300">
                                                                 貼り付け
@@ -1640,7 +1640,7 @@
             );
         }
 
-        // --- TABLE LIST VIEW (WITH COPY BUTTON) ---
+        // --- TABLE LIST VIEW ---
         function TableView({ workers, schedules, searchQuery, onEdit, onCopy, onDelete }) {
             const getWorkerName = (id) => workers.find(w => String(w.id) === String(id))?.name || id;
 
@@ -1794,13 +1794,12 @@
                 notes: schedule?.notes || ''
             });
 
-            // Multi-Worker Assignment Selection
             const [selectedWorkerIds, setSelectedWorkerIds] = useState([schedule?.workerId || workers[0]?.id || 'w1']);
             const [isMultiAssign, setIsMultiAssign] = useState(false);
 
             const handleToggleWorker = (wId) => {
                 if (selectedWorkerIds.includes(wId)) {
-                    if (selectedWorkerIds.length === 1) return; // keep at least 1
+                    if (selectedWorkerIds.length === 1) return;
                     setSelectedWorkerIds(selectedWorkerIds.filter(id => id !== wId));
                 } else {
                     setSelectedWorkerIds([...selectedWorkerIds, wId]);
@@ -1889,7 +1888,6 @@
                                 </div>
                             </div>
 
-                            {/* MULTI ASSIGNMENT WORKER SELECTOR LIST */}
                             {isMultiAssign && !form.id && (
                                 <div className="p-3 bg-brand-50/60 border border-brand-200 rounded-xl space-y-2">
                                     <div className="font-bold text-brand-900 text-[11px] flex justify-between items-center">
@@ -2115,10 +2113,72 @@
             );
         }
 
-        // --- MODAL: SECURITY SETTINGS ---
-        function SecuritySettingsModal({ authSettings, onClose, onSave }) {
+        // --- MODAL: SECURITY & PASSKEY REGISTRATION SETTINGS ---
+        function SecuritySettingsModal({ authSettings, showToast, onClose, onSave }) {
             const [form, setForm] = useState({ ...authSettings });
             const [newPin, setNewPin] = useState(authSettings.pin);
+            const [isRegisteringPasskey, setIsRegisteringPasskey] = useState(false);
+
+            // REGISTER NEW PASSKEY (WebAuthn Create)
+            const handleRegisterPasskey = async () => {
+                setIsRegisteringPasskey(true);
+                try {
+                    if (!window.PublicKeyCredential) {
+                        alert('お使いのブラウザはパスキー（WebAuthn）非対応です');
+                        setIsRegisteringPasskey(false);
+                        return;
+                    }
+
+                    const challenge = new Uint8Array(32);
+                    window.crypto.getRandomValues(challenge);
+
+                    const userId = new Uint8Array(16);
+                    window.crypto.getRandomValues(userId);
+
+                    const createOptions = {
+                        publicKey: {
+                            rp: { name: "作業員一括Web予定表" },
+                            user: {
+                                id: userId,
+                                name: "admin@schedule.app",
+                                displayName: "管理者アカウント"
+                            },
+                            challenge: challenge,
+                            pubKeyCredParams: [{ alg: -7, type: "public-key" }, { alg: -257, type: "public-key" }],
+                            timeout: 60000,
+                            authenticatorSelection: {
+                                authenticatorAttachment: "platform",
+                                userVerification: "preferred"
+                            }
+                        }
+                    };
+
+                    const credential = await navigator.credentials.create(createOptions);
+
+                    if (credential) {
+                        const credIdBase64 = bufferToBase64(credential.rawId);
+                        
+                        // Save to Supabase worker_passkeys
+                        if (supabase) {
+                            await supabase.from('worker_passkeys').upsert({
+                                credential_id: credIdBase64,
+                                user_handle: "admin@schedule.app",
+                                public_key: credIdBase64,
+                                created_at: new Date().toISOString()
+                            });
+                        }
+
+                        showToast('この端末のパスキー（Windows Hello / Touch ID）を正常に登録しました！');
+                    }
+                } catch (err) {
+                    console.error('Register Passkey Error:', err);
+                    if (err.name !== 'NotAllowedError') {
+                        showToast(`パスキー登録失敗: ${err.message}`, 'error');
+                    }
+                } finally {
+                    setIsRegisteringPasskey(false);
+                }
+            };
 
             const handleSubmit = (e) => {
                 e.preventDefault();
@@ -2134,20 +2194,40 @@
                         <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between">
                             <h3 className="font-bold text-sm sm:text-base flex items-center gap-2">
                                 <Icon name="shield" className="w-5 h-5 text-emerald-400" />
-                                セキュリティ＆認証設定
+                                セキュリティ＆パスキー管理
                             </h3>
                             <button onClick={onClose} className="text-slate-400 hover:text-white font-bold">✕</button>
                         </div>
 
                         <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
+                            {/* Passkey Registration Button */}
+                            <div className="p-3.5 bg-brand-50 border border-brand-200 rounded-xl space-y-2">
+                                <div className="font-bold text-brand-900 flex items-center gap-1.5 text-xs">
+                                    <Icon name="fingerprint" className="w-4 h-4 text-brand-600" />
+                                    この端末をパスキー（Passkey）として登録
+                                </div>
+                                <p className="text-[11px] text-brand-800">
+                                    Windows Hello / スマホの生体認証（指紋・顔）を登録し、パスワードなしで高速ログインできるようにします。
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={handleRegisterPasskey}
+                                    disabled={isRegisteringPasskey}
+                                    className="w-full py-2 bg-brand-600 hover:bg-brand-500 text-white font-bold rounded-lg transition shadow-xs flex items-center justify-center gap-1.5"
+                                >
+                                    <Icon name="key" className="w-4 h-4" />
+                                    {isRegisteringPasskey ? '端末キー生成中...' : '現在の端末でパスキーを作成・保存'}
+                                </button>
+                            </div>
+
                             <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
                                 <label className="flex items-center justify-between cursor-pointer">
                                     <div>
                                         <div className="font-bold text-slate-900 flex items-center gap-1.5">
                                             <Icon name="fingerprint" className="w-4 h-4 text-brand-600" />
-                                            スマホ生体認証 (Face ID / Touch ID)
+                                            パスキー生体認証を優先する
                                         </div>
-                                        <div className="text-[11px] text-slate-500">ログイン時にスマホ等の生体照合を要求します</div>
+                                        <div className="text-[11px] text-slate-500">ログイン時にパスキー照合ダイアログを自動起動します</div>
                                     </div>
                                     <input
                                         type="checkbox"
