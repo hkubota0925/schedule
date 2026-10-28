@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>作業員別 一括Web予定表管理システム (Supabase連携・生体認証対応)</title>
+    <title>作業員別 一括Web予定表管理システム (Supabase連携・生体認証・一括コピー対応)</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -26,8 +26,8 @@
         }
     </script>
     <!-- React & ReactDOM -->
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin crossorigin="anonymous"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <!-- Babel for JSX -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <!-- Supabase JS Client Library -->
@@ -64,6 +64,14 @@
         .animate-shake {
             animation: shake 0.4s ease-in-out;
         }
+        .copied-ring {
+            box-shadow: 0 0 0 2px #3b82f6, 0 0 12px rgba(59, 130, 246, 0.5);
+        }
+        .selected-cell {
+            background-color: #eff6ff !important;
+            outline: 2px dashed #2563eb;
+            outline-offset: -2px;
+        }
     </style>
 </head>
 <body class="text-slate-800 bg-slate-100 min-h-screen selection:bg-brand-500 selection:text-white">
@@ -81,7 +89,7 @@
             ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
             : null;
 
-        const { useState, useEffect, useMemo } = React;
+        const { useState, useEffect, useMemo, useRef } = React;
 
         // --- SVG Icon Component ---
         const Icon = ({ name, className = "w-4 h-4" }) => {
@@ -101,6 +109,8 @@
                 chevronRight: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />,
                 search: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />,
                 copy: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />,
+                clipboard: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 022 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />,
+                undo: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />,
                 chart: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />,
                 database: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s-8-1.79-8-4" />,
                 alert: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />,
@@ -120,7 +130,7 @@
             );
         };
 
-        // --- Helper Date Functions ---
+        // --- Helper Date & Time Functions ---
         const getTodayString = () => {
             const today = new Date();
             const year = today.getFullYear();
@@ -143,6 +153,22 @@
             const month = String(d.getMonth() + 1).padStart(2, '0');
             const day = String(d.getDate()).padStart(2, '0');
             return `${year}-${month}-${day}`;
+        };
+
+        const addMinutes = (timeStr, mins) => {
+            if (!timeStr) return '10:00';
+            const [h, m] = timeStr.split(':').map(Number);
+            const d = new Date();
+            d.setHours(h, m + mins);
+            return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+        };
+
+        const getDurationMinutes = (startTime, endTime) => {
+            if (!startTime || !endTime) return 120;
+            const [h1, m1] = startTime.split(':').map(Number);
+            const [h2, m2] = endTime.split(':').map(Number);
+            const diff = (h2 * 60 + m2) - (h1 * 60 + m1);
+            return diff > 0 ? diff : 120;
         };
 
         const TIME_SLOTS = [
@@ -190,6 +216,12 @@
             const [isExportModalOpen, setIsExportModalOpen] = useState(false);
             const [editingSchedule, setEditingSchedule] = useState(null);
             const [toast, setToast] = useState(null);
+
+            // --- COPY, PASTE & UNDO HISTORY STATES ---
+            const [copiedSchedule, setCopiedSchedule] = useState(null);
+            const [selectedScheduleId, setSelectedScheduleId] = useState(null);
+            const [activeCell, setActiveCell] = useState(null); // { workerId, timeSlot }
+            const [historyStack, setHistoryStack] = useState([]); // Stack of actions for Ctrl+Z Undo
 
             // Persistent Master Data
             const [workers, setWorkers] = useState(() => {
@@ -308,61 +340,229 @@
                 sessionStorage.setItem('app_is_authenticated', isAuthenticated ? 'true' : 'false');
             }, [isAuthenticated]);
 
+            // --- KEYBOARD SHORTCUTS FOR COPY, PASTE, DELETE & UNDO (Ctrl+C / Ctrl+V / Delete / Ctrl+Z) ---
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    const activeElement = document.activeElement;
+                    const tagName = activeElement ? activeElement.tagName.toUpperCase() : '';
+                    const isInputing = tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT' || activeElement.isContentEditable;
+                    
+                    if (isInputing) return;
+
+                    const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+
+                    // Ctrl + Z: Undo (元に戻す)
+                    if (isCmdOrCtrl && e.key.toLowerCase() === 'z') {
+                        e.preventDefault();
+                        handleUndo();
+                        return;
+                    }
+
+                    // Delete / Backspace: 選択した予定の削除
+                    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedScheduleId) {
+                        e.preventDefault();
+                        handleDeleteSchedule(selectedScheduleId);
+                        return;
+                    }
+
+                    // Ctrl + C: コピー
+                    if (isCmdOrCtrl && e.key.toLowerCase() === 'c') {
+                        if (selectedScheduleId) {
+                            const target = schedules.find(s => s.id === selectedScheduleId);
+                            if (target) {
+                                e.preventDefault();
+                                setCopiedSchedule(target);
+                                showToast(`予定「${target.title}」をコピーしました。(Ctrl+V でセルに貼り付け可)`, 'info');
+                            }
+                        }
+                    }
+
+                    // Ctrl + V: 貼り付け
+                    if (isCmdOrCtrl && e.key.toLowerCase() === 'v') {
+                        if (copiedSchedule && activeCell) {
+                            e.preventDefault();
+                            handlePasteSchedule(copiedSchedule, activeCell.workerId, activeCell.timeSlot);
+                        } else if (copiedSchedule && !activeCell) {
+                            showToast(`貼り付け先のセル（作業員と時間帯）をクリックして選択してください`, 'error');
+                        }
+                    }
+
+                    // Escape: 選択解除
+                    if (e.key === 'Escape') {
+                        setSelectedScheduleId(null);
+                        setActiveCell(null);
+                    }
+                };
+
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [selectedScheduleId, copiedSchedule, activeCell, schedules, historyStack]);
+
+            // --- UNDO (Ctrl+Z) HANDLER ---
+            const handleUndo = async () => {
+                if (historyStack.length === 0) {
+                    showToast('元に戻す操作履歴はありません', 'info');
+                    return;
+                }
+
+                const lastAction = historyStack[historyStack.length - 1];
+                setHistoryStack(prev => prev.slice(0, prev.length - 1));
+
+                if (lastAction.type === 'ADD') {
+                    // Undo an ADD operation: delete the added schedules
+                    const removeIds = new Set(lastAction.addedSchedules.map(s => s.id));
+                    setSchedules(prev => prev.filter(s => !removeIds.has(s.id)));
+                    setSelectedScheduleId(null);
+
+                    showToast(`「${lastAction.addedSchedules[0]?.title || '予定'}」の追加を取り消し(Undo)しました`);
+
+                    if (supabase) {
+                        try {
+                            for (const sched of lastAction.addedSchedules) {
+                                await supabase.from('schedules').update({ is_deleted: true }).eq('schedule_id', sched.id);
+                            }
+                            fetchSupabaseData();
+                        } catch (err) {
+                            console.error('Undo ADD error:', err);
+                        }
+                    }
+                } else if (lastAction.type === 'UPDATE') {
+                    // Undo an UPDATE operation: restore previous schedule
+                    const prev = lastAction.prevSchedule;
+                    setSchedules(prevList => prevList.map(s => s.id === prev.id ? prev : s));
+
+                    showToast(`「${prev.title}」の編集を取り消し(Undo)しました`);
+
+                    if (supabase) {
+                        try {
+                            await supabase.from('schedules').upsert({
+                                schedule_id: String(prev.id),
+                                work_date: prev.date,
+                                worker_id: String(prev.workerId),
+                                start_time: prev.startTime,
+                                end_time: prev.endTime,
+                                title: prev.title,
+                                location: prev.location || '',
+                                priority: prev.priority || 'medium',
+                                status: prev.status || 'not_started',
+                                notes: prev.notes || '',
+                                is_deleted: false
+                            });
+                            fetchSupabaseData();
+                        } catch (err) {
+                            console.error('Undo UPDATE error:', err);
+                        }
+                    }
+                } else if (lastAction.type === 'DELETE') {
+                    // Undo a DELETE operation: restore deleted schedules
+                    const restoreList = lastAction.deletedSchedules;
+                    setSchedules(prevList => {
+                        let updated = [...prevList];
+                        restoreList.forEach(item => {
+                            if (!updated.some(s => s.id === item.id)) {
+                                updated.push(item);
+                            }
+                        });
+                        return updated;
+                    });
+
+                    showToast(`「${restoreList[0]?.title || '予定'}」の削除を取り消し(Undo)・復元しました`);
+
+                    if (supabase) {
+                        try {
+                            const dbPayloads = restoreList.map(item => ({
+                                schedule_id: String(item.id),
+                                work_date: item.date,
+                                worker_id: String(item.workerId),
+                                start_time: item.startTime,
+                                end_time: item.endTime,
+                                title: item.title,
+                                location: item.location || '',
+                                priority: item.priority || 'medium',
+                                status: item.status || 'not_started',
+                                notes: item.notes || '',
+                                is_deleted: false
+                            }));
+                            await supabase.from('schedules').upsert(dbPayloads);
+                            fetchSupabaseData();
+                        } catch (err) {
+                            console.error('Undo DELETE error:', err);
+                        }
+                    }
+                }
+            };
+
             const handleLogout = () => {
                 setIsAuthenticated(false);
                 sessionStorage.removeItem('app_is_authenticated');
                 showToast('ログアウトし、画面をロックしました', 'info');
             };
 
-            // Schedule Operations (Local + Supabase Cloud)
-            const handleSaveSchedule = async (scheduleData) => {
-                const targetId = scheduleData.id || 's_' + Date.now();
-                const newEntry = { ...scheduleData, id: targetId };
+            // Single & Multi-Worker Schedule Save (Supports Multiple Workers At Once & Undo)
+            const handleSaveSchedule = async (scheduleData, targetWorkerIds = []) => {
+                const workerList = (targetWorkerIds && targetWorkerIds.length > 0) 
+                    ? targetWorkerIds 
+                    : [scheduleData.workerId];
 
-                // Update UI state immediately
-                setSchedules(prev => {
-                    const exists = prev.some(s => s.id === targetId);
-                    return exists ? prev.map(s => s.id === targetId ? newEntry : s) : [...prev, newEntry];
+                const isUpdate = Boolean(scheduleData.id && schedules.some(s => s.id === scheduleData.id));
+                const previousSchedule = isUpdate ? schedules.find(s => s.id === scheduleData.id) : null;
+
+                const newEntries = workerList.map((wId) => {
+                    const targetId = (isUpdate && workerList.length === 1)
+                        ? scheduleData.id
+                        : 's_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
+                    return {
+                        ...scheduleData,
+                        id: targetId,
+                        workerId: String(wId)
+                    };
                 });
 
+                // Save action to history stack for Undo
+                if (isUpdate && previousSchedule && workerList.length === 1) {
+                    setHistoryStack(prev => [...prev.slice(-29), { type: 'UPDATE', prevSchedule: previousSchedule, newSchedule: newEntries[0] }]);
+                } else {
+                    setHistoryStack(prev => [...prev.slice(-29), { type: 'ADD', addedSchedules: newEntries }]);
+                }
+
+                // Update Local UI
+                setSchedules(prev => {
+                    let updated = [...prev];
+                    newEntries.forEach(entry => {
+                        const existsIdx = updated.findIndex(s => s.id === entry.id);
+                        if (existsIdx >= 0) {
+                            updated[existsIdx] = entry;
+                        } else {
+                            updated.push(entry);
+                        }
+                    });
+                    return updated;
+                });
+
+                // Supabase Persistence
                 if (supabase) {
                     try {
-                        // 1. Ensure worker exists in Supabase
-                        const targetWorker = workers.find(w => w.id === scheduleData.workerId);
-                        if (targetWorker) {
-                            await supabase.from('workers').upsert({
-                                worker_id: String(targetWorker.id),
-                                worker_code: String(targetWorker.id),
-                                full_name: targetWorker.name,
-                                role_name: targetWorker.role || '現場担当',
-                                color_code: targetWorker.color || 'bg-blue-600',
-                                display_order: 1,
-                                is_deleted: false
-                            });
-                        }
-
-                        // 2. Save schedule to Supabase
-                        const payload = {
-                            schedule_id: String(targetId),
-                            work_date: scheduleData.date,
-                            worker_id: String(scheduleData.workerId),
-                            start_time: scheduleData.startTime,
-                            end_time: scheduleData.endTime,
-                            title: scheduleData.title,
-                            location: scheduleData.location || '',
-                            priority: scheduleData.priority || 'medium',
-                            status: scheduleData.status || 'not_started',
-                            notes: scheduleData.notes || '',
+                        const dbPayloads = newEntries.map(entry => ({
+                            schedule_id: String(entry.id),
+                            work_date: entry.date,
+                            worker_id: String(entry.workerId),
+                            start_time: entry.startTime,
+                            end_time: entry.endTime,
+                            title: entry.title,
+                            location: entry.location || '',
+                            priority: entry.priority || 'medium',
+                            status: entry.status || 'not_started',
+                            notes: entry.notes || '',
                             is_deleted: false
-                        };
+                        }));
 
-                        const { error } = await supabase.from('schedules').upsert(payload);
+                        const { error } = await supabase.from('schedules').upsert(dbPayloads);
 
                         if (error) {
                             console.error('Supabase Upsert Error:', error);
-                            showToast(`保存エラー: ${error.message} (${error.details || error.code})`, 'error');
+                            showToast(`保存エラー: ${error.message}`, 'error');
                         } else {
-                            showToast('Supabaseへ正常に登録・保存しました！');
+                            showToast(`${newEntries.length}件の予定をSupabaseへ保存しました！ (Ctrl+Zで元に戻せます)`);
                             fetchSupabaseData();
                         }
                     } catch (err) {
@@ -370,16 +570,71 @@
                         showToast(`保存例外エラー: ${err.message}`, 'error');
                     }
                 } else {
-                    showToast('予定を保存しました (ローカル)');
+                    showToast(`${newEntries.length}件の予定を保存しました (ローカル)`);
                 }
 
                 setIsModalOpen(false);
                 setEditingSchedule(null);
             };
 
+            // Direct Copy & Paste Helper (Supports Undo)
+            const handlePasteSchedule = async (sourceSchedule, targetWorkerId, targetTimeSlot) => {
+                if (!sourceSchedule) return;
+                const duration = getDurationMinutes(sourceSchedule.startTime, sourceSchedule.endTime);
+                const newEndTime = addMinutes(targetTimeSlot, duration);
+
+                const newId = 's_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
+                const pastedEntry = {
+                    ...sourceSchedule,
+                    id: newId,
+                    date: selectedDate,
+                    workerId: String(targetWorkerId),
+                    startTime: targetTimeSlot,
+                    endTime: newEndTime,
+                    status: 'not_started' // Copied entries start fresh
+                };
+
+                // Push to history for Undo
+                setHistoryStack(prev => [...prev.slice(-29), { type: 'ADD', addedSchedules: [pastedEntry] }]);
+
+                setSchedules(prev => [...prev, pastedEntry]);
+
+                const targetWorker = workers.find(w => String(w.id) === String(targetWorkerId));
+                showToast(`作業員「${targetWorker?.name || targetWorkerId}」に「${sourceSchedule.title}」を貼り付けました (Ctrl+Zで元に戻せます)`);
+
+                if (supabase) {
+                    try {
+                        await supabase.from('schedules').upsert({
+                            schedule_id: String(newId),
+                            work_date: selectedDate,
+                            worker_id: String(targetWorkerId),
+                            start_time: targetTimeSlot,
+                            end_time: newEndTime,
+                            title: sourceSchedule.title,
+                            location: sourceSchedule.location || '',
+                            priority: sourceSchedule.priority || 'medium',
+                            status: 'not_started',
+                            notes: sourceSchedule.notes || '',
+                            is_deleted: false
+                        });
+                    } catch (err) {
+                        console.error('Paste Error:', err);
+                    }
+                }
+            };
+
             const handleDeleteSchedule = async (id) => {
+                const target = schedules.find(s => s.id === id);
+                if (!target) return;
+
+                // Push to history stack for Undo
+                setHistoryStack(prev => [...prev.slice(-29), { type: 'DELETE', deletedSchedules: [target] }]);
+
                 setSchedules(prev => prev.filter(s => s.id !== id));
-                showToast('予定を削除しました');
+                if (selectedScheduleId === id) setSelectedScheduleId(null);
+
+                showToast(`予定「${target.title}」を削除しました (Ctrl+Zで元に戻せます)`);
+
                 if (supabase) {
                     try {
                         const { error } = await supabase.from('schedules').update({ is_deleted: true }).eq('schedule_id', id);
@@ -434,7 +689,7 @@
             const conflictsMap = useMemo(() => {
                 const map = {};
                 workers.forEach(w => {
-                    const wSchedules = currentDaySchedules.filter(s => s.workerId === w.id);
+                    const wSchedules = currentDaySchedules.filter(s => String(s.workerId) === String(w.id));
                     const conflictIds = new Set();
                     for (let i = 0; i < wSchedules.length; i++) {
                         for (let j = i + 1; j < wSchedules.length; j++) {
@@ -475,6 +730,73 @@
                         </div>
                     )}
 
+                    {/* --- FLOATING CLIPBOARD / SELECTION TOOLBAR --- */}
+                    {copiedSchedule && (
+                        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 border border-brand-500/80 text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3.5 text-xs backdrop-blur-md animate-in slide-in-from-bottom duration-200">
+                            <div className="flex items-center gap-2">
+                                <span className="w-2.5 h-2.5 rounded-full bg-brand-400 animate-ping" />
+                                <Icon name="clipboard" className="w-4 h-4 text-brand-400" />
+                                <div>
+                                    <span className="text-slate-400 text-[11px]">コピー中: </span>
+                                    <span className="font-bold text-brand-200">「{copiedSchedule.title}」</span>
+                                    <span className="text-[10px] text-slate-400 ml-1 font-mono">({copiedSchedule.startTime}~{copiedSchedule.endTime})</span>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 border-l border-slate-700 pl-3">
+                                <span className="hidden sm:inline-block text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded font-mono border border-slate-700">
+                                    セル選択 + Ctrl+V または クリック貼り付け
+                                </span>
+                                <button
+                                    onClick={() => setCopiedSchedule(null)}
+                                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[10px] font-bold transition"
+                                >
+                                    コピー解除
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* FLOATING ACTION TOOLBAR FOR SELECTED SCHEDULE (WHEN NO COPY IN BUFFER) */}
+                    {selectedScheduleId && !copiedSchedule && (
+                        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 border border-amber-500/80 text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3 text-xs backdrop-blur-md animate-in slide-in-from-bottom duration-200">
+                            <div className="flex items-center gap-2">
+                                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+                                <span className="font-bold text-amber-200">
+                                    選択中: 「{schedules.find(s => s.id === selectedScheduleId)?.title || '予定'}」
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-2 border-l border-slate-700 pl-3">
+                                <button
+                                    onClick={() => {
+                                        const target = schedules.find(s => s.id === selectedScheduleId);
+                                        if (target) {
+                                            setCopiedSchedule(target);
+                                            showToast(`「${target.title}」をコピーしました。(Ctrl+V で貼り付け)`, 'info');
+                                        }
+                                    }}
+                                    className="px-2.5 py-1 bg-brand-600 hover:bg-brand-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 shadow-xs"
+                                >
+                                    <Icon name="copy" className="w-3.5 h-3.5" />
+                                    コピー (Ctrl+C)
+                                </button>
+                                <button
+                                    onClick={() => handleDeleteSchedule(selectedScheduleId)}
+                                    className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 shadow-xs"
+                                >
+                                    <Icon name="trash" className="w-3.5 h-3.5" />
+                                    削除 (Delete)
+                                </button>
+                                <button
+                                    onClick={() => setSelectedScheduleId(null)}
+                                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[10px] transition"
+                                >
+                                    選択解除
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
                     {/* --- HEADER --- */}
                     <header className="bg-slate-900 text-white shadow-lg sticky top-0 z-30 no-print">
                         <div className="max-w-[1700px] mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
@@ -497,7 +819,7 @@
                                             </span>
                                         )}
                                     </h1>
-                                    <p className="text-[11px] text-slate-400">全作業員の予定データをリアルタイムで同期・保存します</p>
+                                    <p className="text-[11px] text-slate-400">予定のクリック選択・Ctrl+C/Vコピー・Delete削除・Ctrl+Z Undoに対応</p>
                                 </div>
                             </div>
 
@@ -520,6 +842,20 @@
                                 >
                                     <Icon name="plus" className="w-4 h-4" />
                                     <span>新規予定割当</span>
+                                </button>
+
+                                <button
+                                    onClick={handleUndo}
+                                    disabled={historyStack.length === 0}
+                                    className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition border ${
+                                        historyStack.length > 0
+                                            ? 'bg-slate-800 hover:bg-slate-700 text-amber-300 border-amber-500/50 shadow-xs cursor-pointer'
+                                            : 'bg-slate-800/40 text-slate-500 border-slate-800 cursor-not-allowed opacity-50'
+                                    }`}
+                                    title={historyStack.length > 0 ? "直前の操作を取り消す (Ctrl+Z)" : "元に戻す操作はありません"}
+                                >
+                                    <Icon name="undo" className="w-4 h-4 text-amber-400" />
+                                    <span>元に戻す {historyStack.length > 0 ? `(${historyStack.length})` : ''}</span>
                                 </button>
 
                                 <button
@@ -663,17 +999,30 @@
                                 density={density}
                                 conflictsMap={conflictsMap}
                                 selectedDate={selectedDate}
-                                onSlotClick={(workerId, timeSlot) => {
-                                    setEditingSchedule({
-                                        date: selectedDate,
-                                        workerId,
-                                        startTime: timeSlot,
-                                        endTime: addMinutes(timeSlot, 120),
-                                        priority: 'medium',
-                                        status: 'not_started',
-                                        category: 'work'
-                                    });
-                                    setIsModalOpen(true);
+                                selectedScheduleId={selectedScheduleId}
+                                copiedSchedule={copiedSchedule}
+                                activeCell={activeCell}
+                                onSelectSchedule={(id) => setSelectedScheduleId(id)}
+                                onCopySchedule={(sched) => {
+                                    setCopiedSchedule(sched);
+                                    showToast(`「${sched.title}」をコピーしました。(Ctrl+V で貼り付け)`, 'info');
+                                }}
+                                onCellClick={(workerId, timeSlot) => {
+                                    setActiveCell({ workerId, timeSlot });
+                                    if (copiedSchedule) {
+                                        handlePasteSchedule(copiedSchedule, workerId, timeSlot);
+                                    } else {
+                                        setEditingSchedule({
+                                            date: selectedDate,
+                                            workerId,
+                                            startTime: timeSlot,
+                                            endTime: addMinutes(timeSlot, 120),
+                                            priority: 'medium',
+                                            status: 'not_started',
+                                            category: 'work'
+                                        });
+                                        setIsModalOpen(true);
+                                    }
                                 }}
                                 onScheduleClick={(schedule) => {
                                     setEditingSchedule(schedule);
@@ -702,6 +1051,10 @@
                                 onEdit={(sched) => {
                                     setEditingSchedule(sched);
                                     setIsModalOpen(true);
+                                }}
+                                onCopy={(sched) => {
+                                    setCopiedSchedule(sched);
+                                    showToast(`「${sched.title}」をコピーしました。`, 'info');
                                 }}
                                 onDelete={handleDeleteSchedule}
                             />
@@ -1009,26 +1362,29 @@
         }
 
         // --- TIMELINE VIEW ---
-        function TimelineView({ workers, schedules, searchQuery, density, conflictsMap, selectedDate, onSlotClick, onScheduleClick }) {
+        function TimelineView({ workers, schedules, searchQuery, density, conflictsMap, selectedDate, selectedScheduleId, copiedSchedule, activeCell, onSelectSchedule, onCopySchedule, onCellClick, onScheduleClick }) {
             const filteredWorkers = useMemo(() => {
                 if (!searchQuery) return workers;
                 const q = searchQuery.toLowerCase();
                 return workers.filter(w => {
                     const matchWorker = w.name.toLowerCase().includes(q) || w.role.toLowerCase().includes(q);
-                    const hasMatchingSchedule = schedules.some(s => s.workerId === w.id && (s.title.toLowerCase().includes(q) || (s.location && s.location.toLowerCase().includes(q))));
+                    const hasMatchingSchedule = schedules.some(s => String(s.workerId) === String(w.id) && (s.title.toLowerCase().includes(q) || (s.location && s.location.toLowerCase().includes(q))));
                     return matchWorker || hasMatchingSchedule;
                 });
             }, [workers, schedules, searchQuery]);
 
             return (
                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-                    <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs font-bold text-slate-600">
+                    <div className="p-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-slate-600">
                         <div className="flex items-center space-x-2">
                             <span className="bg-brand-100 text-brand-800 px-2.5 py-0.5 rounded-md border border-brand-200">
                                 当日配置作業員: {filteredWorkers.length}名
                             </span>
                             <span className="text-slate-400">|</span>
-                            <span>セルクリックで即時割り当て</span>
+                            <span className="text-slate-600 flex items-center gap-1 flex-wrap">
+                                <Icon name="copy" className="w-3.5 h-3.5 text-brand-600 shrink-0" />
+                                クリック選択 ➔ <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Delete</kbd> 削除 / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+C</kbd> コピー / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+V</kbd> 貼り付け / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+Z</kbd> Undo
+                            </span>
                         </div>
                         <div className="flex items-center space-x-3 text-[11px]">
                             <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> 完了</span>
@@ -1053,7 +1409,7 @@
                             </thead>
                             <tbody className="divide-y divide-slate-200">
                                 {filteredWorkers.map((worker) => {
-                                    const workerSchedules = schedules.filter(s => s.workerId === worker.id);
+                                    const workerSchedules = schedules.filter(s => String(s.workerId) === String(worker.id));
                                     const hasConflict = (conflictsMap[worker.id] || []).length > 0;
                                     const rowPadding = density === 'compact' ? 'py-1' : 'py-2.5';
 
@@ -1089,16 +1445,21 @@
                                                     return slotHour >= startH && slotHour < endH;
                                                 });
 
+                                                const isCellActive = activeCell && String(activeCell.workerId) === String(worker.id) && activeCell.timeSlot === slot;
+
                                                 return (
                                                     <td
                                                         key={slot}
-                                                        onClick={() => onSlotClick(worker.id, slot)}
+                                                        onClick={() => onCellClick(worker.id, slot)}
                                                         className={`border-r border-slate-200/70 p-0.5 relative cursor-pointer hover:bg-brand-50/60 transition ${
                                                             density === 'compact' ? 'h-9' : 'h-14'
-                                                        }`}
+                                                        } ${isCellActive ? 'selected-cell' : ''}`}
                                                     >
                                                         {matches.map(sched => {
                                                             const isStart = parseInt(sched.startTime.split(':')[0], 10) === slotHour;
+                                                            const isSelected = selectedScheduleId === sched.id;
+                                                            const isCopied = copiedSchedule && copiedSchedule.id === sched.id;
+
                                                             let statusBg = "bg-slate-600 text-white";
                                                             if (sched.status === 'completed') statusBg = "bg-emerald-600 text-white";
                                                             if (sched.status === 'in_progress') statusBg = "bg-brand-600 text-white";
@@ -1108,22 +1469,50 @@
                                                                     key={sched.id}
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
+                                                                        onSelectSchedule(sched.id);
+                                                                    }}
+                                                                    onDoubleClick={(e) => {
+                                                                        e.stopPropagation();
                                                                         onScheduleClick(sched);
                                                                     }}
-                                                                    className={`w-full h-full p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:scale-[1.02] transition ${statusBg}`}
+                                                                    className={`w-full h-full p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:scale-[1.02] transition relative group/card ${statusBg} ${
+                                                                        isSelected ? 'ring-2 ring-yellow-400 ring-offset-1 z-10' : ''
+                                                                    } ${isCopied ? 'copied-ring' : ''}`}
                                                                 >
-                                                                    {isStart ? (
-                                                                        <div className="font-bold truncate">
-                                                                            {sched.startTime} {sched.title}
-                                                                        </div>
-                                                                    ) : (
-                                                                        <div className="opacity-75 truncate text-[9px]">
-                                                                            ➔ {sched.title}
-                                                                        </div>
-                                                                    )}
+                                                                    <div className="flex items-center justify-between w-full">
+                                                                        {isStart ? (
+                                                                            <div className="font-bold truncate flex-1">
+                                                                                {sched.startTime} {sched.title}
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div className="opacity-75 truncate text-[9px] flex-1">
+                                                                                ➔ {sched.title}
+                                                                            </div>
+                                                                        )}
+
+                                                                        {/* QUICK COPY BUTTON ON HOVER */}
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                onCopySchedule(sched);
+                                                                            }}
+                                                                            title="コピー (Ctrl+C)"
+                                                                            className="hidden group-hover/card:flex items-center justify-center p-0.5 bg-black/40 hover:bg-black/70 rounded text-white ml-0.5 shrink-0 transition"
+                                                                        >
+                                                                            <Icon name="copy" className="w-3 h-3" />
+                                                                        </button>
+                                                                    </div>
                                                                 </div>
                                                             );
                                                         })}
+
+                                                        {/* PLACEHOLDER WHEN CELL IS CLICKED AND COPY IN BUFFER */}
+                                                        {matches.length === 0 && copiedSchedule && isCellActive && (
+                                                            <div className="w-full h-full flex items-center justify-center text-[9px] text-brand-600 font-bold bg-brand-50 rounded border border-brand-300">
+                                                                貼り付け
+                                                            </div>
+                                                        )}
                                                     </td>
                                                 );
                                             })}
@@ -1180,7 +1569,7 @@
                                             <div className="text-[10px] text-slate-500 font-normal">{w.role}</div>
                                         </td>
                                         {weekDays.map(d => {
-                                            const dayScheds = schedules.filter(s => s.workerId === w.id && s.date === d);
+                                            const dayScheds = schedules.filter(s => String(s.workerId) === String(w.id) && s.date === d);
                                             return (
                                                 <td
                                                     key={d}
@@ -1212,9 +1601,9 @@
             );
         }
 
-        // --- TABLE LIST VIEW ---
-        function TableView({ workers, schedules, searchQuery, onEdit, onDelete }) {
-            const getWorkerName = (id) => workers.find(w => w.id === id)?.name || id;
+        // --- TABLE LIST VIEW (WITH COPY BUTTON) ---
+        function TableView({ workers, schedules, searchQuery, onEdit, onCopy, onDelete }) {
+            const getWorkerName = (id) => workers.find(w => String(w.id) === String(id))?.name || id;
 
             const filtered = useMemo(() => {
                 if (!searchQuery) return schedules;
@@ -1270,10 +1659,13 @@
                                             </span>
                                         </td>
                                         <td className="p-3 text-right space-x-1">
-                                            <button onClick={() => onEdit(s)} className="p-1.5 text-brand-600 hover:bg-brand-50 rounded">
+                                            <button onClick={() => onCopy(s)} className="p-1.5 text-brand-600 hover:bg-brand-50 rounded" title="内容をコピー">
+                                                <Icon name="copy" className="w-4 h-4" />
+                                            </button>
+                                            <button onClick={() => onEdit(s)} className="p-1.5 text-slate-600 hover:bg-slate-100 rounded" title="編集">
                                                 <Icon name="edit" className="w-4 h-4" />
                                             </button>
-                                            <button onClick={() => onDelete(s.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded">
+                                            <button onClick={() => onDelete(s.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded" title="削除">
                                                 <Icon name="trash" className="w-4 h-4" />
                                             </button>
                                         </td>
@@ -1329,7 +1721,7 @@
                         <h3 className="font-bold text-slate-800 text-sm mb-3">作業員別 当日件数内訳</h3>
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
                             {workers.map(w => {
-                                const count = schedules.filter(s => s.workerId === w.id).length;
+                                const count = schedules.filter(s => String(s.workerId) === String(w.id)).length;
                                 return (
                                     <div key={w.id} className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
                                         <div className="truncate pr-2">
@@ -1348,7 +1740,7 @@
             );
         }
 
-        // --- MODAL: EDIT SCHEDULE ---
+        // --- MODAL: EDIT & MULTI-ASSIGN SCHEDULE ---
         function ScheduleEditModal({ schedule, workers, onClose, onSave, onDelete }) {
             const [form, setForm] = useState({
                 id: schedule?.id || null,
@@ -1363,10 +1755,33 @@
                 notes: schedule?.notes || ''
             });
 
+            // Multi-Worker Assignment Selection
+            const [selectedWorkerIds, setSelectedWorkerIds] = useState([schedule?.workerId || workers[0]?.id || 'w1']);
+            const [isMultiAssign, setIsMultiAssign] = useState(false);
+
+            const handleToggleWorker = (wId) => {
+                if (selectedWorkerIds.includes(wId)) {
+                    if (selectedWorkerIds.length === 1) return; // keep at least 1
+                    setSelectedWorkerIds(selectedWorkerIds.filter(id => id !== wId));
+                } else {
+                    setSelectedWorkerIds([...selectedWorkerIds, wId]);
+                }
+            };
+
+            const handleSelectAllWorkers = () => {
+                if (selectedWorkerIds.length === workers.length) {
+                    setSelectedWorkerIds([form.workerId]);
+                } else {
+                    setSelectedWorkerIds(workers.map(w => w.id));
+                }
+            };
+
             const handleSubmit = (e) => {
                 e.preventDefault();
                 if (!form.title.trim()) return;
-                onSave(form);
+                
+                const targets = isMultiAssign ? selectedWorkerIds : [form.workerId];
+                onSave(form, targets);
             };
 
             return (
@@ -1392,19 +1807,78 @@
                                         className="w-full border border-slate-300 rounded-lg p-2 font-bold focus:ring-2 focus:ring-brand-500"
                                     />
                                 </div>
+
                                 <div>
-                                    <label className="block text-slate-700 font-bold mb-1">割当作業員</label>
-                                    <select
-                                        value={form.workerId}
-                                        onChange={(e) => setForm({ ...form, workerId: e.target.value })}
-                                        className="w-full border border-slate-300 rounded-lg p-2 font-bold focus:ring-2 focus:ring-brand-500"
-                                    >
-                                        {workers.map(w => (
-                                            <option key={w.id} value={w.id}>{w.name} ({w.role})</option>
-                                        ))}
-                                    </select>
+                                    <div className="flex justify-between items-center mb-1">
+                                        <label className="block text-slate-700 font-bold">割当作業員</label>
+                                        {!form.id && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setIsMultiAssign(!isMultiAssign)}
+                                                className="text-[10px] text-brand-600 hover:underline font-bold"
+                                            >
+                                                {isMultiAssign ? '単一選択に戻す' : '👥 複数人に同時一括割り当て'}
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {!isMultiAssign ? (
+                                        <select
+                                            value={form.workerId}
+                                            onChange={(e) => {
+                                                setForm({ ...form, workerId: e.target.value });
+                                                setSelectedWorkerIds([e.target.value]);
+                                            }}
+                                            className="w-full border border-slate-300 rounded-lg p-2 font-bold focus:ring-2 focus:ring-brand-500"
+                                        >
+                                            {workers.map(w => (
+                                                <option key={w.id} value={w.id}>{w.name} ({w.role})</option>
+                                            ))}
+                                        </select>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={handleSelectAllWorkers}
+                                            className="w-full py-1.5 px-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg text-slate-700 font-bold text-left flex justify-between items-center"
+                                        >
+                                            <span>全 {selectedWorkerIds.length} 名が選択中</span>
+                                            <span className="text-[10px] text-brand-600 font-mono">
+                                                {selectedWorkerIds.length === workers.length ? '全解除' : '全選択'}
+                                            </span>
+                                        </button>
+                                    )}
                                 </div>
                             </div>
+
+                            {/* MULTI ASSIGNMENT WORKER SELECTOR LIST */}
+                            {isMultiAssign && !form.id && (
+                                <div className="p-3 bg-brand-50/60 border border-brand-200 rounded-xl space-y-2">
+                                    <div className="font-bold text-brand-900 text-[11px] flex justify-between items-center">
+                                        <span>同時割当の対象作業員を選択してください ({selectedWorkerIds.length}名)</span>
+                                    </div>
+                                    <div className="max-h-36 overflow-y-auto grid grid-cols-2 gap-1.5 pr-1">
+                                        {workers.map(w => {
+                                            const isChecked = selectedWorkerIds.includes(w.id);
+                                            return (
+                                                <label
+                                                    key={w.id}
+                                                    className={`p-1.5 rounded-lg border text-[11px] flex items-center justify-between cursor-pointer transition ${
+                                                        isChecked ? 'bg-brand-600 text-white border-brand-700 font-bold' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                                                    }`}
+                                                >
+                                                    <span className="truncate">{w.name}</span>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={isChecked}
+                                                        onChange={() => handleToggleWorker(w.id)}
+                                                        className="ml-1 rounded text-brand-600 focus:ring-brand-500"
+                                                    />
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
 
                             <div className="grid grid-cols-2 gap-3">
                                 <div>
@@ -1506,7 +1980,7 @@
                                         キャンセル
                                     </button>
                                     <button type="submit" className="px-5 py-2 bg-brand-600 text-white rounded-lg font-bold hover:bg-brand-500 transition shadow-sm">
-                                        保存する
+                                        {isMultiAssign ? `${selectedWorkerIds.length}名にまとめて保存` : '保存する'}
                                     </button>
                                 </div>
                             </div>
@@ -1756,13 +2230,6 @@
                     </div>
                 </div>
             );
-        }
-
-        function addMinutes(timeStr, mins) {
-            const [h, m] = timeStr.split(':').map(Number);
-            const d = new Date();
-            d.setHours(h, m + mins);
-            return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
         }
 
         // Render React Application
