@@ -1125,6 +1125,7 @@
             const [authError, setAuthError] = useState('');
             const [generatedOTP, setGeneratedOTP] = useState('');
             const [otpTimer, setOtpTimer] = useState(60);
+            const [hasPlatformAuth, setHasPlatformAuth] = useState(true);
 
             useEffect(() => {
                 let timer;
@@ -1134,34 +1135,56 @@
                 return () => clearInterval(timer);
             }, [step2FA, otpTimer]);
 
+            // Check if Platform Authenticator (Windows Hello / Touch ID / Face ID) is supported
+            useEffect(() => {
+                if (window.PublicKeyCredential && typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+                    PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+                        .then(available => setHasPlatformAuth(available))
+                        .catch(() => setHasPlatformAuth(false));
+                } else {
+                    setHasPlatformAuth(false);
+                }
+            }, []);
+
             const handleBiometricAuth = async () => {
                 setIsScanning(true);
                 setAuthError('');
 
                 try {
                     if (window.PublicKeyCredential && navigator.credentials && navigator.credentials.get) {
-                        try {
-                            const dummyChallenge = new Uint8Array(32);
-                            window.crypto.getRandomValues(dummyChallenge);
-                            await navigator.credentials.get({
-                                publicKey: {
-                                    challenge: dummyChallenge,
-                                    timeout: 60000,
+                        const dummyChallenge = new Uint8Array(32);
+                        window.crypto.getRandomValues(dummyChallenge);
+
+                        // authenticatorAttachment: "platform" を指定し、USBセキュリティキー要求ポップアップを回避
+                        await navigator.credentials.get({
+                            publicKey: {
+                                challenge: dummyChallenge,
+                                timeout: 30000,
+                                userVerification: "preferred",
+                                authenticatorSelection: {
+                                    authenticatorAttachment: "platform", // プラットフォーム端末固有の生体認証（Windows Hello, Touch ID, Face ID）のみ指定
                                     userVerification: "preferred"
                                 }
-                            });
-                        } catch (e) {
-                            console.warn('Native WebAuthn prompt note:', e);
-                        }
+                            }
+                        });
                     }
 
                     setTimeout(() => {
                         setIsScanning(false);
                         onSuccess();
-                    }, 1200);
+                    }, 800);
                 } catch (err) {
                     setIsScanning(false);
-                    setAuthError('生体認証に失敗しました。PINコードをご利用ください。');
+                    console.warn('WebAuthn Prompt Note:', err);
+                    
+                    if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
+                        setAuthError('生体認証（Windows Hello等）がキャンセルされました。右側の「2段階認証 (PIN+OTP)」タブをご利用ください。');
+                    } else if (err.name === 'InvalidStateError' || err.name === 'NotSupportedError') {
+                        setAuthError('お使いの端末に生体認証が設定されていないか、非対応です。PINコード認証をご利用ください。');
+                    } else {
+                        // パスキー未登録環境などのフォールバック
+                        setAuthError('生体認証が検出されませんでした。「2段階認証 (PIN+OTP)」に切り替えてログインできます。');
+                    }
                 }
             };
 
@@ -1240,6 +1263,12 @@
 
                         {mode === 'biometric' && (
                             <div className="text-center space-y-6 py-2">
+                                {!hasPlatformAuth && (
+                                    <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-300 text-[11px] text-left">
+                                        ⚠️ <strong>ご注意:</strong> お使いのPCに Windows Hello (指紋・顔認証) が設定されていない場合、USBキー画面が表示されることがあります。右上の「2段階認証 (PIN+OTP)」をご利用ください。
+                                    </div>
+                                )}
+
                                 <div className="relative inline-flex items-center justify-center">
                                     <button
                                         type="button"
@@ -1260,17 +1289,27 @@
 
                                 <div className="space-y-1">
                                     <p className="text-xs font-bold text-slate-200">画面の生体キーをタップして認証を試行</p>
-                                    <p className="text-[11px] text-slate-400">iOS (Face ID/Touch ID) / Android (指紋・顔) 対応</p>
+                                    <p className="text-[11px] text-slate-400">Windows Hello (顔/指紋) / iOS / Android 対応</p>
                                 </div>
 
-                                <button
-                                    type="button"
-                                    onClick={handleBiometricAuth}
-                                    className="w-full py-3 bg-brand-600 hover:bg-brand-500 text-white font-bold rounded-xl text-xs transition shadow-lg flex items-center justify-center gap-2"
-                                >
-                                    <Icon name="smartphone" className="w-4 h-4" />
-                                    生体認証でログインを開始
-                                </button>
+                                <div className="space-y-2">
+                                    <button
+                                        type="button"
+                                        onClick={handleBiometricAuth}
+                                        className="w-full py-3 bg-brand-600 hover:bg-brand-500 text-white font-bold rounded-xl text-xs transition shadow-lg flex items-center justify-center gap-2"
+                                    >
+                                        <Icon name="smartphone" className="w-4 h-4" />
+                                        生体認証 (Windows Hello / スマホ) で開始
+                                    </button>
+                                    
+                                    <button
+                                        type="button"
+                                        onClick={() => { setMode('2fa'); setStep2FA('pin'); setAuthError(''); }}
+                                        className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs transition"
+                                    >
+                                        暗証番号 (PIN) でログインする
+                                    </button>
+                                </div>
                             </div>
                         )}
 
