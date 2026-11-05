@@ -444,6 +444,26 @@
                             console.error('Undo ADD error:', err);
                         }
                     }
+                } else if (lastAction.type === 'BULK_UPDATE') {
+                    const originals = lastAction.prevSchedules;
+                    const payloads = originals.map(s => ({
+                        schedule_id: String(s.id), work_date: s.date,
+                        worker_id: String(s.workerId), start_time: s.startTime,
+                        end_time: s.endTime, title: s.title, location: s.location || '',
+                        priority: s.priority || 'medium', status: s.status || 'not_started',
+                        notes: s.notes || '', is_deleted: false
+                    }));
+                    try {
+                        if (!supabase) throw new Error('DB未接続');
+                        const {error} = await supabase.from('schedules').upsert(payloads);
+                        if (error) throw error;
+                        const restoreMap = new Map(originals.map(s => [s.id, s]));
+                        setSchedules(prev => prev.map(s => restoreMap.get(s.id) || s));
+                        showToast(`${originals.length}件の編集を元に戻しました`);
+                    } catch(err) {
+                        setHistoryStack(prev => [...prev, lastAction]);
+                        showToast(`元に戻せませんでした: ${err.message}`, 'error');
+                    }
                 } else if (lastAction.type === 'UPDATE') {
                     const prev = lastAction.prevSchedule;
                     setSchedules(prevList => prevList.map(s => s.id === prev.id ? prev : s));
@@ -514,81 +534,83 @@
                 showToast('ログアウトしました', 'info');
             };
 
-            // Save Schedule Action
-            const handleSaveSchedule = async (scheduleData, targetWorkerIds = []) => {
+            // Ver 1.05: 同一作業の判定は「編集前の日時・件名・場所・備考・種別」がすべて一致する予定。
+            // 進捗・優先度は担当者ごとに異なることがあるため判定対象に含めない。
+            const sameWorkKey = (s) => JSON.stringify([
+                s.date, s.startTime, s.endTime,
+                (s.title || '').trim(), (s.location || '').trim(),
+                (s.notes || '').trim(), s.category || 'work'
+            ]);
+            const findSameWorkSchedules = (source) => {
+                if (!source?.id) return [];
+                const key = sameWorkKey(source);
+                return schedules.filter(s => sameWorkKey(s) === key);
+            };
+
+            // Save Schedule Action: 一括更新は1つのDB要求で実施（原則として一括成功/失敗）
+            const handleSaveSchedule = async (scheduleData, targetWorkerIds = [], editScope = 'single') => {
                 if (!canEdit) return showToast('編集権限がありません', 'error');
-                const workerList = (targetWorkerIds && targetWorkerIds.length > 0) 
-                    ? targetWorkerIds 
-                    : [scheduleData.workerId];
-
+                if (!supabase) return showToast('Supabaseに接続されていません', 'error');
                 const isUpdate = Boolean(scheduleData.id && schedules.some(s => s.id === scheduleData.id));
-                const previousSchedule = isUpdate ? schedules.find(s => s.id === scheduleData.id) : null;
+                const original = isUpdate ? schedules.find(s => s.id === scheduleData.id) : null;
+                let previousEntries = [];
+                let newEntries = [];
 
-                const newEntries = workerList.map((wId) => {
-                    const targetId = (isUpdate && workerList.length === 1)
-                        ? scheduleData.id
-                        : 's_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
-                    return {
-                        ...scheduleData,
-                        id: targetId,
-                        workerId: String(wId)
-                    };
-                });
-
-                if (isUpdate && previousSchedule && workerList.length === 1) {
-                    setHistoryStack(prev => [...prev.slice(-29), { type: 'UPDATE', prevSchedule: previousSchedule, newSchedule: newEntries[0] }]);
-                } else {
-                    setHistoryStack(prev => [...prev.slice(-29), { type: 'ADD', addedSchedules: newEntries }]);
-                }
-
-                setSchedules(prev => {
-                    let updated = [...prev];
-                    newEntries.forEach(entry => {
-                        const existsIdx = updated.findIndex(s => s.id === entry.id);
-                        if (existsIdx >= 0) {
-                            updated[existsIdx] = entry;
-                        } else {
-                            updated.push(entry);
-                        }
-                    });
-                    return updated;
-                });
-
-                if (supabase) {
-                    try {
-                        const dbPayloads = newEntries.map(entry => ({
-                            schedule_id: String(entry.id),
-                            work_date: entry.date,
-                            worker_id: String(entry.workerId),
-                            start_time: entry.startTime,
-                            end_time: entry.endTime,
-                            title: entry.title,
-                            location: entry.location || '',
-                            priority: entry.priority || 'medium',
-                            status: entry.status || 'not_started',
-                            notes: entry.notes || '',
-                            is_deleted: false
-                        }));
-
-                        const { error } = await supabase.from('schedules').upsert(dbPayloads);
-
-                        if (error) {
-                            console.error('Supabase Upsert Error:', error);
-                            showToast(`保存エラー: ${error.message}`, 'error');
-                        } else {
-                            showToast(`${newEntries.length}件の予定をSupabaseへ保存しました！`);
-                            fetchSupabaseData();
-                        }
-                    } catch (err) {
-                        console.error('Supabase Sync Exception:', err);
-                        showToast(`保存例外エラー: ${err.message}`, 'error');
+                if (isUpdate && editScope === 'all') {
+                    previousEntries = findSameWorkSchedules(original);
+                    if (previousEntries.length < 2) {
+                        return showToast('同じ作業内容の予定が複数見つかりません。個別編集を選択してください。', 'error');
                     }
+                    // 作業員の割り当て(ID)を維持し、予定の内容・日付・時間・進捗を同期する。
+                    // この編集では、個別の担当者選択欄で変更したworkerIdは他の予定へ波及させない。
+                    newEntries = previousEntries.map(item => ({...item,
+                        date: scheduleData.date, startTime: scheduleData.startTime,
+                        endTime: scheduleData.endTime, title: scheduleData.title,
+                        location: scheduleData.location, priority: scheduleData.priority,
+                        status: scheduleData.status, category: scheduleData.category || 'work',
+                        notes: scheduleData.notes
+                    }));
+                } else if (isUpdate) {
+                    previousEntries = [original];
+                    newEntries = [{...original, ...scheduleData, id: original.id,
+                        workerId: String(scheduleData.workerId)}];
                 } else {
-                    showToast(`${newEntries.length}件の予定を保存しました (ローカル)`);
+                    const workerList = targetWorkerIds.length ? targetWorkerIds : [scheduleData.workerId];
+                    newEntries = workerList.map(wId => ({...scheduleData,
+                        id: 's_' + Date.now() + '_' + Math.random().toString(36).slice(2,10),
+                        workerId: String(wId)
+                    }));
                 }
 
-                setIsModalOpen(false);
-                setEditingSchedule(null);
+                if (!scheduleData.title?.trim()) return showToast('作業件名を入力してください', 'error');
+                const toPayload = (entry) => ({
+                    schedule_id: String(entry.id), work_date: entry.date,
+                    worker_id: String(entry.workerId), start_time: entry.startTime,
+                    end_time: entry.endTime, title: entry.title,
+                    location: entry.location || '', priority: entry.priority || 'medium',
+                    status: entry.status || 'not_started',
+                    notes: entry.notes || '', is_deleted: false
+                });
+                try {
+                    const { error } = await supabase.from('schedules').upsert(newEntries.map(toPayload));
+                    if (error) throw error;
+                    const entryMap = new Map(newEntries.map(s => [s.id, s]));
+                    setSchedules(prev => {
+                        const existing = new Set(prev.map(s => s.id));
+                        return [...prev.map(s => entryMap.get(s.id) || s),
+                            ...newEntries.filter(s => !existing.has(s.id))];
+                    });
+                    setHistoryStack(prev => [...prev.slice(-29), previousEntries.length
+                        ? {type: 'BULK_UPDATE', prevSchedules: previousEntries, newSchedules: newEntries}
+                        : {type: 'ADD', addedSchedules: newEntries}]);
+                    showToast(editScope === 'all'
+                        ? `同じ作業内容の${newEntries.length}名分を一括更新しました`
+                        : `${newEntries.length}件の予定を保存しました`);
+                    setIsModalOpen(false);
+                    setEditingSchedule(null);
+                } catch (err) {
+                    showToast(`保存に失敗したため変更を確定していません: ${err.message}`, 'error');
+                }
             };
 
             // 共通の予定移動処理: ドラッグ/切り取りとも同じIDをUPDATEし、成功後に画面へ反映
@@ -1162,6 +1184,7 @@
                     {canEdit && isModalOpen && (
                         <ScheduleEditModal
                             schedule={editingSchedule}
+                            matchingSchedules={findSameWorkSchedules(editingSchedule)}
                             workers={workers}
                             onClose={() => setIsModalOpen(false)}
                             onSave={handleSaveSchedule}
@@ -1664,7 +1687,7 @@
         }
 
         // --- MODAL: EDIT & MULTI-ASSIGN SCHEDULE ---
-        function ScheduleEditModal({ schedule, workers, onClose, onSave, onDelete }) {
+        function ScheduleEditModal({ schedule, matchingSchedules = [], workers, onClose, onSave, onDelete }) {
             const [form, setForm] = useState({
                 id: schedule?.id || null,
                 date: schedule?.date || getTodayString(),
@@ -1680,6 +1703,7 @@
 
             const [selectedWorkerIds, setSelectedWorkerIds] = useState([schedule?.workerId || workers[0]?.id || 'w1']);
             const [isMultiAssign, setIsMultiAssign] = useState(false);
+            const [editScope, setEditScope] = useState('single');
 
             const handleToggleWorker = (wId) => {
                 if (selectedWorkerIds.includes(wId)) {
@@ -1703,7 +1727,8 @@
                 if (!form.title.trim()) return;
                 
                 const targets = isMultiAssign ? selectedWorkerIds : [form.workerId];
-                onSave(form, targets);
+                if (form.id && editScope === 'all' && !window.confirm(`同じ作業内容の${matchingSchedules.length}件をまとめて更新します。よろしいですか？`)) return;
+                onSave(form, targets, form.id ? editScope : 'single');
             };
 
             return (
@@ -1718,6 +1743,33 @@
                         </div>
 
                         <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
+                            {form.id && matchingSchedules.length > 1 && (
+                                <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 space-y-2">
+                                    <div className="font-bold text-blue-900">保存範囲の選択</div>
+                                    <div className="flex flex-wrap gap-4">
+                                        <label className="flex items-center gap-1.5 cursor-pointer">
+                                            <input type="radio" name="editScope" checked={editScope === 'single'}
+                                                onChange={() => setEditScope('single')} />
+                                            この担当者だけ
+                                        </label>
+                                        <label className="flex items-center gap-1.5 cursor-pointer">
+                                            <input type="radio" name="editScope" checked={editScope === 'all'}
+                                                onChange={() => setEditScope('all')} />
+                                            同じ作業の全員（{matchingSchedules.length}名分）
+                                        </label>
+                                    </div>
+                                    {editScope === 'all' && (
+                                        <div className="text-blue-900 text-[11px] leading-relaxed">
+                                            対象：{matchingSchedules.map(s => workers.find(w => String(w.id) === String(s.workerId))?.name || s.workerId).join('、')}
+                                            <div className="mt-1">日付・時間・件名・場所・優先度・進捗・備考を同時更新します。各担当者の割当は維持します。</div>
+                                        </div>
+                                    )}
+                                    <div className="text-[10px] text-blue-800">
+                                        判定条件：編集前の作業日、開始・終了時刻、件名、場所、備考、作業種別が一致する予定。
+                                        別途作成した同一内容の予定も対象になるため、保存前に対象者を確認してください。
+                                    </div>
+                                </div>
+                            )}
                             <div className="grid grid-cols-2 gap-3">
                                 <div>
                                     <label className="block text-slate-700 font-bold mb-1">対象日付</label>
@@ -1901,7 +1953,7 @@
                                         キャンセル
                                     </button>
                                     <button type="submit" className="px-5 py-2 bg-brand-600 text-white rounded-lg font-bold hover:bg-brand-500 transition shadow-sm">
-                                        {isMultiAssign ? `${selectedWorkerIds.length}名にまとめて保存` : '保存する'}
+                                        {form.id && editScope === 'all' ? `${matchingSchedules.length}名分を一括保存` : isMultiAssign ? `${selectedWorkerIds.length}名にまとめて保存` : '保存する'}
                                     </button>
                                 </div>
                             </div>
