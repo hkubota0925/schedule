@@ -191,6 +191,16 @@
             '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00'
         ];
 
+        // 日時表の開始・終了位置を分単位で計算する（無効値はNaN）。
+        const slotHourToMinutes = (value) => {
+            const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ''));
+            if (!match) return NaN;
+            const hour = Number(match[1]);
+            const minute = Number(match[2]);
+            return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
+                ? hour * 60 + minute : NaN;
+        };
+
         // --- CLEAN INITIAL WORKER MASTER (15 WORKERS) ---
         const INITIAL_WORKERS = Array.from({ length: 15 }, (_, i) => ({
             id: `w${i + 1}`,
@@ -1362,11 +1372,15 @@
                                             </td>
 
                                             {TIME_SLOTS.map((slot) => {
-                                                const slotHour = parseInt(slot.split(':')[0], 10);
+                                                // 1時間セルへの予定描画は「分」単位で重なり判定する。
+                                                // 例: 17:30終了なら17:00セルの左半分まで表示する。
+                                                const slotStart = slotHourToMinutes(slot);
+                                                const slotEnd = slotStart + 60;
                                                 const matches = workerSchedules.filter(s => {
-                                                    const startH = parseInt(s.startTime.split(':')[0], 10);
-                                                    const endH = parseInt(s.endTime.split(':')[0], 10);
-                                                    return slotHour >= startH && slotHour < endH;
+                                                    const start = slotHourToMinutes(s.startTime);
+                                                    const end = slotHourToMinutes(s.endTime);
+                                                    return Number.isFinite(start) && Number.isFinite(end) &&
+                                                        start < slotEnd && end > slotStart;
                                                 });
 
                                                 const isCellActive = activeCell && String(activeCell.workerId) === String(worker.id) && activeCell.timeSlot === slot;
@@ -1389,8 +1403,16 @@
                                                             density === 'compact' ? 'h-9' : 'h-14'
                                                         } ${isCellActive ? 'selected-cell' : ''} ${dragOverCell === `${worker.id}|${slot}` ? 'bg-emerald-100 outline outline-2 outline-emerald-500 outline-offset-[-2px]' : ''}`}
                                                     >
+                                                        {/* 分単位の目盛り。セル中央の点線は30分位置。 */}
+                                                        <div className="absolute inset-y-0 left-1/2 border-l border-dashed border-slate-200 pointer-events-none" aria-hidden="true" />
                                                         {matches.map(sched => {
-                                                            const isStart = parseInt(sched.startTime.split(':')[0], 10) === slotHour;
+                                                            const startMinutes = slotHourToMinutes(sched.startTime);
+                                                            const endMinutes = slotHourToMinutes(sched.endTime);
+                                                            const visibleStart = Math.max(slotStart, startMinutes);
+                                                            const visibleEnd = Math.min(slotEnd, endMinutes);
+                                                            const leftPct = (visibleStart - slotStart) / 60 * 100;
+                                                            const widthPct = (visibleEnd - visibleStart) / 60 * 100;
+                                                            const isStart = startMinutes >= slotStart && startMinutes < slotEnd;
                                                             const isSelected = selectedScheduleId === sched.id;
                                                             const isCopied = copiedSchedule && copiedSchedule.id === sched.id;
 
@@ -1402,7 +1424,7 @@
                                                                 <div
                                                                     key={sched.id}
                                                                     draggable={canEdit}
-                                                                    title={canEdit ? 'ドラッグで担当者・時間帯を移動（作業時間は維持）' : undefined}
+                                                                    title={`${sched.startTime}～${sched.endTime} ${sched.title}${canEdit ? '（ドラッグで移動）' : ''}`}
                                                                     onDragStart={e => {
                                                                         if (!canEdit) { e.preventDefault(); return; }
                                                                         dragOrigin.current = sched.id;
@@ -1423,7 +1445,8 @@
                                                                         e.stopPropagation();
                                                                         onScheduleClick(sched);
                                                                     }}
-                                                                    className={`w-full h-full p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:scale-[1.02] transition relative group/card ${statusBg} ${
+                                                                    style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                                                                    className={`absolute top-0.5 bottom-0.5 p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:brightness-110 transition group/card ${statusBg} ${
                                                                         isSelected ? 'ring-2 ring-yellow-400 ring-offset-1 z-10' : ''
                                                                     } ${isCopied ? 'copied-ring' : ''} ${dragScheduleId === sched.id ? 'opacity-50' : ''} ${canEdit ? 'cursor-grab active:cursor-grabbing' : ''}`}
                                                                 >
