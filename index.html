@@ -86,7 +86,7 @@
 
         // Initialize Supabase Client
         const supabase = (window.supabase && SUPABASE_URL.startsWith("https://"))
-            ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+            ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { experimental: { passkey: true } } })
             : null;
 
         const { useState, useEffect, useMemo, useRef } = React;
@@ -204,19 +204,11 @@
         function App() {
             const [dbConnected, setDbConnected] = useState(false);
 
-            // Security / Authentication States
-            const [authSettings, setAuthSettings] = useState(() => {
-                const saved = localStorage.getItem('app_auth_settings');
-                return saved ? JSON.parse(saved) : {
-                    useBiometrics: true,
-                    use2FA: true,
-                    pin: '1234'
-                };
-            });
-
-            const [isAuthenticated, setIsAuthenticated] = useState(() => {
-                return sessionStorage.getItem('app_is_authenticated') === 'true';
-            });
+            // Supabase Authセッション以外ではDBを利用しない
+            const [authReady, setAuthReady] = useState(false);
+            const [currentWorker, setCurrentWorker] = useState(null);
+            const canEdit = ['admin', 'editor'].includes(currentWorker?.permissionRole);
+            const isAdmin = currentWorker?.permissionRole === 'admin';
 
             // Active View & Date State
             const [selectedDate, setSelectedDate] = useState(getTodayString());
@@ -238,16 +230,8 @@
             const [activeCell, setActiveCell] = useState(null); // { workerId, timeSlot }
             const [historyStack, setHistoryStack] = useState([]); // Stack of actions for Ctrl+Z Undo
 
-            // Persistent Master Data
-            const [workers, setWorkers] = useState(() => {
-                const saved = localStorage.getItem('app_workers_master');
-                return saved ? JSON.parse(saved) : INITIAL_WORKERS;
-            });
-
-            const [schedules, setSchedules] = useState(() => {
-                const saved = localStorage.getItem('app_schedules_master');
-                return saved ? JSON.parse(saved) : [];
-            });
+            const [workers, setWorkers] = useState([]);
+            const [schedules, setSchedules] = useState([]);
 
             const showToast = (message, type = 'success') => {
                 setToast({ message, type });
@@ -276,26 +260,15 @@
                             name: w.full_name || w.name,
                             role: w.role_name || w.role,
                             color: w.color_code || 'bg-blue-600',
-                            badgeCls: 'bg-blue-100 text-blue-800'
+                            badgeCls: 'bg-blue-100 text-blue-800',
+                            loginEmail: w.login_email || '',
+                            loginEnabled: w.login_enabled === true,
+                            permissionRole: w.permission_role || 'viewer',
+                            authUserId: w.auth_user_id || null
                         }));
                         setWorkers(formattedW);
                     } else {
-                        // Seed Workers Table in Supabase if Empty
-                        const seedPayload = INITIAL_WORKERS.map((w, idx) => ({
-                            worker_id: String(w.id),
-                            worker_code: String(w.id),
-                            full_name: w.name,
-                            role_name: w.role,
-                            color_code: w.color,
-                            display_order: idx + 1,
-                            is_deleted: false
-                        }));
-                        const { error: seedErr } = await supabase.from('workers').upsert(seedPayload);
-                        if (seedErr) {
-                            console.error('Seed Workers Error:', seedErr);
-                        } else {
-                            setWorkers(INITIAL_WORKERS);
-                        }
+                        setWorkers([]); // DBが空でも作業員を無断登録しない
                     }
 
                     // 2. Fetch Schedules from Supabase
@@ -334,26 +307,39 @@
                 }
             };
 
+            const refreshIdentity = async () => {
+                if (!supabase) { setAuthReady(true); return; }
+                try {
+                    const { data: u, error: ue } = await supabase.auth.getUser();
+                    if (ue || !u?.user) { setCurrentWorker(null); setWorkers([]); setSchedules([]); return; }
+                    const { error: claimError } = await supabase.rpc('schedule_claim_worker');
+                    if (claimError) throw claimError;
+                    const { data: profile, error: pe } = await supabase.from('workers')
+                        .select('*').eq('auth_user_id', u.user.id).eq('is_deleted',false).maybeSingle();
+                    if (pe) throw pe;
+                    if (!profile || !profile.login_enabled) {
+                        await supabase.auth.signOut();
+                        setCurrentWorker(null); setWorkers([]); setSchedules([]);
+                        showToast('作業員マスタにログイン許可がありません。管理者に連絡してください。', 'error');
+                        return;
+                    }
+                    setCurrentWorker({ id: String(profile.worker_id || profile.id), name: profile.full_name,
+                        permissionRole: profile.permission_role || 'viewer' });
+                    await fetchSupabaseData();
+                } catch(e) {
+                    setCurrentWorker(null); setWorkers([]); setSchedules([]);
+                    showToast('認証・権限の確認に失敗: '+e.message, 'error');
+                } finally { setAuthReady(true); }
+            };
             useEffect(() => {
-                fetchSupabaseData();
+                refreshIdentity();
+                if (!supabase) return;
+                const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
+                    // Supabase の認証イベント内で認証APIを直接awaitしない
+                    setTimeout(() => refreshIdentity(), 0);
+                });
+                return () => subscription.unsubscribe();
             }, []);
-
-            // LocalStorage Auto-Sync
-            useEffect(() => {
-                localStorage.setItem('app_auth_settings', JSON.stringify(authSettings));
-            }, [authSettings]);
-
-            useEffect(() => {
-                localStorage.setItem('app_workers_master', JSON.stringify(workers));
-            }, [workers]);
-
-            useEffect(() => {
-                localStorage.setItem('app_schedules_master', JSON.stringify(schedules));
-            }, [schedules]);
-
-            useEffect(() => {
-                sessionStorage.setItem('app_is_authenticated', isAuthenticated ? 'true' : 'false');
-            }, [isAuthenticated]);
 
             // --- KEYBOARD SHORTCUTS (Ctrl+C / Ctrl+V / Delete / Ctrl+Z) ---
             useEffect(() => {
@@ -362,7 +348,7 @@
                     const tagName = activeElement ? activeElement.tagName.toUpperCase() : '';
                     const isInputing = tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT' || activeElement.isContentEditable;
                     
-                    if (isInputing) return;
+                    if (isInputing || !canEdit) return;
 
                     const isCmdOrCtrl = e.metaKey || e.ctrlKey;
 
@@ -411,10 +397,11 @@
 
                 window.addEventListener('keydown', handleKeyDown);
                 return () => window.removeEventListener('keydown', handleKeyDown);
-            }, [selectedScheduleId, copiedSchedule, activeCell, schedules, historyStack]);
+            }, [selectedScheduleId, copiedSchedule, activeCell, schedules, historyStack, canEdit]);
 
             // --- UNDO (Ctrl+Z) HANDLER ---
             const handleUndo = async () => {
+                if (!canEdit) return;
                 if (historyStack.length === 0) {
                     showToast('元に戻す操作履歴はありません', 'info');
                     return;
@@ -504,14 +491,15 @@
                 }
             };
 
-            const handleLogout = () => {
-                setIsAuthenticated(false);
-                sessionStorage.removeItem('app_is_authenticated');
-                showToast('ログアウトし、画面をロックしました', 'info');
+            const handleLogout = async () => {
+                await supabase?.auth.signOut();
+                setCurrentWorker(null); setWorkers([]); setSchedules([]);
+                showToast('ログアウトしました', 'info');
             };
 
             // Save Schedule Action
             const handleSaveSchedule = async (scheduleData, targetWorkerIds = []) => {
+                if (!canEdit) return showToast('編集権限がありません', 'error');
                 const workerList = (targetWorkerIds && targetWorkerIds.length > 0) 
                     ? targetWorkerIds 
                     : [scheduleData.workerId];
@@ -588,6 +576,7 @@
 
             // Copy & Paste Schedule
             const handlePasteSchedule = async (sourceSchedule, targetWorkerId, targetTimeSlot) => {
+                if (!canEdit) return;
                 if (!sourceSchedule) return;
                 const duration = getDurationMinutes(sourceSchedule.startTime, sourceSchedule.endTime);
                 const newEndTime = addMinutes(targetTimeSlot, duration);
@@ -631,6 +620,7 @@
             };
 
             const handleDeleteSchedule = async (id) => {
+                if (!canEdit) return;
                 const target = schedules.find(s => s.id === id);
                 if (!target) return;
 
@@ -657,6 +647,7 @@
             };
 
             const handleSaveWorkersMaster = async (updatedWorkers) => {
+                if (!isAdmin) return showToast('管理者権限がありません', 'error');
                 setWorkers(updatedWorkers);
                 if (supabase) {
                     try {
@@ -667,9 +658,12 @@
                             role_name: w.role || '現場担当',
                             color_code: w.color || 'bg-blue-600',
                             display_order: idx + 1,
-                            is_deleted: false
+                            is_deleted: false,
+                            login_email: w.loginEmail?.trim() || null,
+                            login_enabled: w.loginEnabled === true,
+                            permission_role: w.permissionRole || 'viewer'
                         }));
-                        const { error } = await supabase.from('workers').upsert(payload);
+                        const { error } = await supabase.from('workers').upsert(payload, {onConflict:'worker_id'});
                         if (error) {
                             showToast(`マスタ更新エラー: ${error.message}`, 'error');
                         } else {
@@ -709,17 +703,9 @@
                 return map;
             }, [currentDaySchedules, workers]);
 
-            if (!isAuthenticated) {
-                return (
-                    <AuthScreen
-                        authSettings={authSettings}
-                        showToast={showToast}
-                        onSuccess={() => {
-                            setIsAuthenticated(true);
-                            showToast('本人認証に成功しました');
-                        }}
-                    />
-                );
+            if (!authReady) return <div className="min-h-screen flex items-center justify-center text-slate-600">ログイン状態を確認中...</div>;
+            if (!currentWorker) {
+                return <AuthScreen onSuccess={refreshIdentity} />;
             }
 
             return (
@@ -735,7 +721,7 @@
                     )}
 
                     {/* --- FLOATING CLIPBOARD TOOLBAR --- */}
-                    {copiedSchedule && (
+                    {canEdit && copiedSchedule && (
                         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 border border-brand-500/80 text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3.5 text-xs backdrop-blur-md animate-in slide-in-from-bottom duration-200">
                             <div className="flex items-center gap-2">
                                 <span className="w-2.5 h-2.5 rounded-full bg-brand-400 animate-ping" />
@@ -760,7 +746,7 @@
                     )}
 
                     {/* FLOATING ACTION TOOLBAR FOR SELECTED SCHEDULE */}
-                    {selectedScheduleId && !copiedSchedule && (
+                    {canEdit && selectedScheduleId && !copiedSchedule && (
                         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 border border-amber-500/80 text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3 text-xs backdrop-blur-md animate-in slide-in-from-bottom duration-200">
                             <div className="flex items-center gap-2">
                                 <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
@@ -821,13 +807,13 @@
                                             </span>
                                         )}
                                     </h1>
-                                    <p className="text-[11px] text-slate-400">WebAuthn パスキー生体認証・Ctrl+C/V・Delete・Ctrl+Z Undo完全対応</p>
+                                    <p className="text-[11px] text-slate-400">ログイン中: {currentWorker.name} / {isAdmin ? '管理者' : canEdit ? '編集者' : '閲覧者（参照のみ）'}</p>
                                 </div>
                             </div>
 
                             {/* Header Action Buttons */}
                             <div className="flex items-center flex-wrap gap-2">
-                                <button
+                                {canEdit && <button
                                     onClick={() => {
                                         setEditingSchedule({
                                             date: selectedDate,
@@ -844,9 +830,9 @@
                                 >
                                     <Icon name="plus" className="w-4 h-4" />
                                     <span>新規予定割当</span>
-                                </button>
+                                </button>}
 
-                                <button
+                                {canEdit && <button
                                     onClick={handleUndo}
                                     disabled={historyStack.length === 0}
                                     className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition border ${
@@ -858,7 +844,7 @@
                                 >
                                     <Icon name="undo" className="w-4 h-4 text-amber-400" />
                                     <span>元に戻す {historyStack.length > 0 ? `(${historyStack.length})` : ''}</span>
-                                </button>
+                                </button>}
 
                                 <button
                                     onClick={() => fetchSupabaseData()}
@@ -868,20 +854,20 @@
                                     <span>データ再読み込み</span>
                                 </button>
 
-                                <button
+                                {isAdmin && <button
                                     onClick={() => setIsWorkerMasterOpen(true)}
                                     className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition"
                                 >
                                     <Icon name="settings" className="w-4 h-4 text-brand-400" />
                                     <span>作業員マスタ ({workers.length}名)</span>
-                                </button>
+                                </button>}
 
                                 <button
                                     onClick={() => setIsSecurityModalOpen(true)}
                                     className="bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium flex items-center gap-1.5 transition"
                                 >
                                     <Icon name="fingerprint" className="w-4 h-4" />
-                                    <span className="hidden md:inline">認証＆パスキー登録</span>
+                                    <span className="hidden md:inline">自分のパスキー登録</span>
                                 </button>
 
                                 <button
@@ -1003,12 +989,14 @@
                                 selectedScheduleId={selectedScheduleId}
                                 copiedSchedule={copiedSchedule}
                                 activeCell={activeCell}
-                                onSelectSchedule={(id) => setSelectedScheduleId(id)}
+                                onSelectSchedule={(id) => canEdit && setSelectedScheduleId(id)}
                                 onCopySchedule={(sched) => {
+                                    if (!canEdit) return;
                                     setCopiedSchedule(sched);
                                     showToast(`「${sched.title}」をコピーしました。(Ctrl+V で貼り付け)`, 'info');
                                 }}
                                 onCellClick={(workerId, timeSlot) => {
+                                    if (!canEdit) return;
                                     setActiveCell({ workerId, timeSlot });
                                     if (copiedSchedule) {
                                         handlePasteSchedule(copiedSchedule, workerId, timeSlot);
@@ -1026,6 +1014,7 @@
                                     }
                                 }}
                                 onScheduleClick={(schedule) => {
+                                    if (!canEdit) return;
                                     setEditingSchedule(schedule);
                                     setIsModalOpen(true);
                                 }}
@@ -1049,15 +1038,18 @@
                                 workers={workers}
                                 schedules={currentDaySchedules}
                                 searchQuery={searchQuery}
+                                readOnly={!canEdit}
                                 onEdit={(sched) => {
+                                    if (!canEdit) return;
                                     setEditingSchedule(sched);
                                     setIsModalOpen(true);
                                 }}
                                 onCopy={(sched) => {
+                                    if (!canEdit) return;
                                     setCopiedSchedule(sched);
                                     showToast(`「${sched.title}」をコピーしました。`, 'info');
                                 }}
-                                onDelete={handleDeleteSchedule}
+                                onDelete={canEdit ? handleDeleteSchedule : () => {}}
                             />
                         )}
 
@@ -1072,18 +1064,13 @@
                     {/* --- MODALS --- */}
                     {isSecurityModalOpen && (
                         <SecuritySettingsModal
-                            authSettings={authSettings}
+                            currentWorker={currentWorker}
                             showToast={showToast}
                             onClose={() => setIsSecurityModalOpen(false)}
-                            onSave={(updated) => {
-                                setAuthSettings(updated);
-                                showToast('セキュリティ認証設定を更新しました');
-                                setIsSecurityModalOpen(false);
-                            }}
-                        />
+                                                />
                     )}
 
-                    {isModalOpen && (
+                    {canEdit && isModalOpen && (
                         <ScheduleEditModal
                             schedule={editingSchedule}
                             workers={workers}
@@ -1093,7 +1080,7 @@
                         />
                     )}
 
-                    {isWorkerMasterOpen && (
+                    {isAdmin && isWorkerMasterOpen && (
                         <WorkerMasterModal
                             workers={workers}
                             onClose={() => setIsWorkerMasterOpen(false)}
@@ -1117,289 +1104,49 @@
             );
         }
 
-        // --- AUTHENTICATION SCREEN COMPONENT (PASSKEY / WEBAUTHN + PIN + OTP) ---
-        function AuthScreen({ authSettings, showToast, onSuccess }) {
-            const [mode, setMode] = useState(authSettings.useBiometrics ? 'biometric' : '2fa');
-            const [pinInput, setPinInput] = useState('');
-            const [otpInput, setOtpInput] = useState('');
-            const [step2FA, setStep2FA] = useState('pin');
-            const [isScanning, setIsScanning] = useState(false);
-            const [authError, setAuthError] = useState('');
-            const [generatedOTP, setGeneratedOTP] = useState('');
-            const [otpTimer, setOtpTimer] = useState(60);
-
-            useEffect(() => {
-                let timer;
-                if (step2FA === 'otp' && otpTimer > 0) {
-                    timer = setInterval(() => setOtpTimer(prev => prev - 1), 1000);
-                }
-                return () => clearInterval(timer);
-            }, [step2FA, otpTimer]);
-
-            // PASSKEY SIGN-IN (WebAuthn Get)
-            const handlePasskeyAuth = async () => {
-                setIsScanning(true);
-                setAuthError('');
-
-                try {
-                    if (!window.PublicKeyCredential) {
-                        throw new Error('お使いのブラウザはパスキー（WebAuthn）非対応です。');
-                    }
-
-                    // 1. Check saved passkeys from Supabase worker_passkeys
-                    let passkeyRecords = [];
-                    if (supabase) {
-                        const { data, error } = await supabase.from('worker_passkeys').select('*').limit(20);
-                        if (!error && data) passkeyRecords = data;
-                    }
-
-                    const challenge = new Uint8Array(32);
-                    window.crypto.getRandomValues(challenge);
-
-                    const allowCredentials = passkeyRecords.map(pk => ({
-                        id: base64ToBuffer(pk.credential_id || pk.id),
-                        type: 'public-key'
-                    }));
-
-                    const options = {
-                        publicKey: {
-                            challenge: challenge,
-                            timeout: 60000,
-                            userVerification: "preferred",
-                            authenticatorSelection: {
-                                authenticatorAttachment: "platform"
-                            }
+        // --- Supabase Auth signed-in identity / server-verified passkeys ---
+        function AuthScreen({ onSuccess }) {
+            const [email, setEmail] = useState('');
+            const [code, setCode] = useState('');
+            const [sent, setSent] = useState(false);
+            const [busy, setBusy] = useState(false);
+            const [msg, setMsg] = useState('');
+            const run = async (fn) => {
+                setBusy(true); setMsg('');
+                try { await fn(); } catch(e) { setMsg(e.message || '認証に失敗しました'); }
+                finally { setBusy(false); }
+            };
+            return <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+                <div className="w-full max-w-md bg-slate-900 text-white rounded-2xl p-8 space-y-5">
+                    <h2 className="text-xl font-bold">作業員一括Web予定表</h2>
+                    <p className="text-xs text-slate-400">作業員マスタに登録済みの本人だけが利用できます。</p>
+                    <button disabled={busy} onClick={()=>run(async()=>{
+                        const { error } = await supabase.auth.signInWithPasskey();
+                        if(error) throw error;
+                        await onSuccess();
+                    })} className="w-full py-3 rounded-xl bg-brand-600 font-bold">パスキーでログイン</button>
+                    <div className="text-xs text-slate-400">初回登録・パスキーがない場合：登録済みメールアドレスで認証</div>
+                    <form className="space-y-3" onSubmit={e=>{e.preventDefault();run(async()=>{
+                        if(!sent) {
+                            const {error}=await supabase.auth.signInWithOtp({email:email.trim(),options:{shouldCreateUser:true}});
+                            if(error)throw error;
+                            setSent(true);setMsg('確認コードをメールに送信しました。メール内のリンクの場合はリンクを開いてください。');
+                        } else {
+                            const {error}=await supabase.auth.verifyOtp({email:email.trim(),token:code.trim(),type:'email'});
+                            if(error)throw error;
+                            await onSuccess();
                         }
-                    };
-
-                    if (allowCredentials.length > 0) {
-                        options.publicKey.allowCredentials = allowCredentials;
-                    }
-
-                    // Call WebAuthn Get Credentials
-                    const assertion = await navigator.credentials.get(options);
-
-                    if (assertion) {
-                        setIsScanning(false);
-                        onSuccess();
-                    }
-                } catch (err) {
-                    setIsScanning(false);
-                    console.warn('Passkey Auth Note:', err);
-                    
-                    if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
-                        setAuthError('パスキー認証がキャンセルされました。PINコード認証でサインインできます。');
-                    } else {
-                        // Fallback: If no passkey registered yet, allow smooth onboarding
-                        setAuthError('登録済みのパスキーが検出されませんでした。「2段階認証 (PIN+OTP)」でログインし、設定からパスキーを登録してください。');
-                    }
-                }
-            };
-
-            const handlePinSubmit = (e) => {
-                e.preventDefault();
-                setAuthError('');
-                if (pinInput === authSettings.pin) {
-                    if (authSettings.use2FA) {
-                        const code = Math.floor(100000 + Math.random() * 900000).toString();
-                        setGeneratedOTP(code);
-                        setOtpTimer(60);
-                        setStep2FA('otp');
-                    } else {
-                        onSuccess();
-                    }
-                } else {
-                    setAuthError('暗証番号(PIN)が一致しません (初期設定: 1234)');
-                }
-            };
-
-            const handleOtpSubmit = (e) => {
-                e.preventDefault();
-                setAuthError('');
-                if (otpInput === generatedOTP || otpInput === '888888') {
-                    onSuccess();
-                } else {
-                    setAuthError('ワンタイム認証コードが正しくありません');
-                }
-            };
-
-            return (
-                <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 relative overflow-hidden">
-                    <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-brand-600/20 rounded-full blur-3xl pointer-events-none" />
-                    <div className="absolute bottom-10 right-10 w-72 h-72 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
-
-                    <div className="relative w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl text-white z-10">
-                        <div className="text-center space-y-2 mb-6">
-                            <div className="inline-flex p-3 bg-brand-600/20 border border-brand-500/30 rounded-2xl text-brand-400 mb-1">
-                                <Icon name="shield" className="w-8 h-8" />
-                            </div>
-                            <h2 className="text-xl font-extrabold tracking-tight">作業員一括Web予定表</h2>
-                            <p className="text-xs text-slate-400">
-                                パスキー（Windows Hello / Face ID / Touch ID）<br />または2段階認証で安全にログインします。
-                            </p>
-                        </div>
-
-                        {authError && (
-                            <div className="mb-5 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-start gap-2 animate-shake">
-                                <Icon name="alert" className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                                <div>{authError}</div>
-                            </div>
-                        )}
-
-                        <div className="grid grid-cols-2 gap-1 bg-slate-950 p-1 rounded-xl mb-6 text-xs font-bold border border-slate-800">
-                            <button
-                                type="button"
-                                onClick={() => { setMode('biometric'); setAuthError(''); }}
-                                className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition ${
-                                    mode === 'biometric' ? 'bg-brand-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200'
-                                }`}
-                            >
-                                <Icon name="fingerprint" className="w-4 h-4" />
-                                パキー (生体認証)
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => { setMode('2fa'); setStep2FA('pin'); setAuthError(''); }}
-                                className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition ${
-                                    mode === '2fa' ? 'bg-brand-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200'
-                                }`}
-                            >
-                                <Icon name="key" className="w-4 h-4" />
-                                2段階認証 (PIN+OTP)
-                            </button>
-                        </div>
-
-                        {mode === 'biometric' && (
-                            <div className="text-center space-y-6 py-2">
-                                <div className="relative inline-flex items-center justify-center">
-                                    <button
-                                        type="button"
-                                        onClick={handlePasskeyAuth}
-                                        disabled={isScanning}
-                                        className={`w-28 h-28 rounded-3xl border-2 flex flex-col items-center justify-center gap-2 transition duration-300 relative overflow-hidden ${
-                                            isScanning 
-                                                ? 'border-emerald-400 bg-emerald-500/10 text-emerald-400 animate-pulse' 
-                                                : 'border-brand-500/60 bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 hover:scale-105'
-                                        }`}
-                                    >
-                                        <Icon name="fingerprint" className="w-12 h-12" />
-                                        <span className="text-[10px] font-extrabold tracking-wider uppercase">
-                                            {isScanning ? '照合中...' : 'Passkey 生体キー'}
-                                        </span>
-                                    </button>
-                                </div>
-
-                                <div className="space-y-1">
-                                    <p className="text-xs font-bold text-slate-200">パスキー認証（Windows Hello / Touch ID）</p>
-                                    <p className="text-[11px] text-slate-400">端末固有のセキュリティキーでパスワードレス検証</p>
-                                </div>
-
-                                <div className="space-y-2">
-                                    <button
-                                        type="button"
-                                        onClick={handlePasskeyAuth}
-                                        className="w-full py-3 bg-brand-600 hover:bg-brand-500 text-white font-bold rounded-xl text-xs transition shadow-lg flex items-center justify-center gap-2"
-                                    >
-                                        <Icon name="smartphone" className="w-4 h-4" />
-                                        パスキーでサインイン
-                                    </button>
-                                    
-                                    <button
-                                        type="button"
-                                        onClick={() => { setMode('2fa'); setStep2FA('pin'); setAuthError(''); }}
-                                        className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs transition"
-                                    >
-                                        暗証番号 (PIN) でログインする
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-
-                        {mode === '2fa' && (
-                            <div>
-                                {step2FA === 'pin' ? (
-                                    <form onSubmit={handlePinSubmit} className="space-y-4 text-xs">
-                                        <div>
-                                            <label className="block text-slate-300 font-bold mb-1.5 flex items-center gap-1.5">
-                                                <Icon name="lock" className="w-4 h-4 text-brand-400" />
-                                                暗証番号 (PIN) を入力
-                                            </label>
-                                            <input
-                                                type="password"
-                                                maxLength="8"
-                                                required
-                                                autoFocus
-                                                value={pinInput}
-                                                onChange={(e) => setPinInput(e.target.value)}
-                                                placeholder="暗証番号を入力 (初期: 1234)"
-                                                className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-center text-lg font-mono tracking-widest text-white focus:ring-2 focus:ring-brand-500 focus:outline-none"
-                                            />
-                                        </div>
-
-                                        <button
-                                            type="submit"
-                                            className="w-full py-3 bg-brand-600 hover:bg-brand-500 text-white font-bold rounded-xl transition shadow-lg text-xs"
-                                        >
-                                            次へ (ワンタイム認証コード発行)
-                                        </button>
-                                    </form>
-                                ) : (
-                                    <form onSubmit={handleOtpSubmit} className="space-y-4 text-xs">
-                                        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs text-center space-y-1">
-                                            <div className="font-bold flex items-center justify-center gap-1">
-                                                <Icon name="smartphone" className="w-4 h-4" />
-                                                2段階認証コードを発行しました
-                                            </div>
-                                            <div className="text-xl font-mono font-extrabold tracking-widest text-emerald-400">
-                                                {generatedOTP}
-                                            </div>
-                                            <div className="text-[10px] opacity-80">
-                                                ※デモ用コードを表示中 (有効期限: {otpTimer}秒)
-                                            </div>
-                                        </div>
-
-                                        <div>
-                                            <label className="block text-slate-300 font-bold mb-1.5">
-                                                6桁のワンタイムコードを入力
-                                            </label>
-                                            <input
-                                                type="text"
-                                                maxLength="6"
-                                                required
-                                                autoFocus
-                                                value={otpInput}
-                                                onChange={(e) => setOtpInput(e.target.value)}
-                                                placeholder="6桁コードを入力"
-                                                className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-center text-lg font-mono tracking-widest text-white focus:ring-2 focus:ring-brand-500 focus:outline-none"
-                                            />
-                                        </div>
-
-                                        <div className="flex gap-2">
-                                            <button
-                                                type="button"
-                                                onClick={() => setStep2FA('pin')}
-                                                className="w-1/3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs"
-                                            >
-                                                戻る
-                                            </button>
-                                            <button
-                                                type="submit"
-                                                className="w-2/3 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition shadow-lg text-xs"
-                                            >
-                                                認証してログイン
-                                            </button>
-                                        </div>
-                                    </form>
-                                )}
-                            </div>
-                        )}
-
-                        <div className="mt-6 pt-4 border-t border-slate-800 text-center text-[11px] text-slate-500">
-                            作業員一括管理システム Security v2.5 (Passkey Ready)
-                        </div>
-                    </div>
+                    })}}>
+                        <input type="email" required value={email} onChange={e=>setEmail(e.target.value)}
+                           placeholder="登録済みメールアドレス" className="w-full p-3 rounded-lg bg-slate-800 border border-slate-600" />
+                        {sent && <input value={code} onChange={e=>setCode(e.target.value)}
+                           placeholder="メールに届いた確認コード" className="w-full p-3 rounded-lg bg-slate-800 border border-slate-600" />}
+                        <button disabled={busy} type="submit" className="w-full py-2 rounded-lg bg-slate-700 font-bold">{sent?'確認コードでログイン':'メールに確認コードを送信'}</button>
+                    </form>
+                    {msg && <div className="text-sm text-amber-300">{msg}</div>}
+                    <p className="text-[11px] text-slate-500">従来の共通PIN・固定OTPログインは廃止しました。</p>
                 </div>
-            );
+            </div>;
         }
 
         // --- TIMELINE VIEW ---
@@ -1641,7 +1388,7 @@
         }
 
         // --- TABLE LIST VIEW ---
-        function TableView({ workers, schedules, searchQuery, onEdit, onCopy, onDelete }) {
+        function TableView({ workers, schedules, searchQuery, readOnly=false, onEdit, onCopy, onDelete }) {
             const getWorkerName = (id) => workers.find(w => String(w.id) === String(id))?.name || id;
 
             const filtered = useMemo(() => {
@@ -1698,15 +1445,15 @@
                                             </span>
                                         </td>
                                         <td className="p-3 text-right space-x-1">
-                                            <button onClick={() => onCopy(s)} className="p-1.5 text-brand-600 hover:bg-brand-50 rounded" title="内容をコピー">
+                                            {!readOnly && <button onClick={() => onCopy(s)} className="p-1.5 text-brand-600 hover:bg-brand-50 rounded" title="内容をコピー">
                                                 <Icon name="copy" className="w-4 h-4" />
-                                            </button>
-                                            <button onClick={() => onEdit(s)} className="p-1.5 text-slate-600 hover:bg-slate-100 rounded" title="編集">
+                                            </button>}
+                                            {!readOnly && <button onClick={() => onEdit(s)} className="p-1.5 text-slate-600 hover:bg-slate-100 rounded" title="編集">
                                                 <Icon name="edit" className="w-4 h-4" />
-                                            </button>
-                                            <button onClick={() => onDelete(s.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded" title="削除">
+                                            </button>}
+                                            {!readOnly && <button onClick={() => onDelete(s.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded" title="削除">
                                                 <Icon name="trash" className="w-4 h-4" />
-                                            </button>
+                                            </button>}
                                         </td>
                                     </tr>
                                 ))
@@ -2033,7 +1780,7 @@
 
             const handleAdd = () => {
                 const newId = 'w_' + Date.now();
-                setList([...list, { id: newId, name: '新規 作業員', role: '現場担当', color: 'bg-slate-600', badgeCls: 'bg-slate-100 text-slate-800' }]);
+                setList([...list, { id: newId, name: '新規 作業員', role: '現場担当', color: 'bg-slate-600', badgeCls: 'bg-slate-100 text-slate-800', loginEmail:'',loginEnabled:false,permissionRole:'viewer' }]);
             };
 
             const handleChange = (id, field, value) => {
@@ -2047,7 +1794,7 @@
 
             return (
                 <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-                    <div className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden">
+                    <div className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden">
                         <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between">
                             <h3 className="font-bold text-sm sm:text-base flex items-center gap-2">
                                 <Icon name="users" className="w-5 h-5 text-brand-400" />
@@ -2074,6 +1821,15 @@
                                         className="border border-slate-300 rounded-lg p-1.5 text-xs flex-1 focus:ring-2 focus:ring-brand-500"
                                         placeholder="職種・役割"
                                     />
+                                    <input type="email" placeholder="ログインメール" value={w.loginEmail || ''}
+                                        onChange={e=>handleChange(w.id,'loginEmail',e.target.value)}
+                                        className="border border-slate-300 rounded-lg p-1.5 text-xs w-44" />
+                                    <select value={w.permissionRole || 'viewer'} onChange={e=>handleChange(w.id,'permissionRole',e.target.value)}
+                                        className="border border-slate-300 rounded-lg p-1.5 text-xs">
+                                        <option value="viewer">閲覧者</option><option value="editor">編集者</option><option value="admin">管理者</option>
+                                    </select>
+                                    <label className="text-xs whitespace-nowrap"><input type="checkbox" checked={w.loginEnabled === true}
+                                        onChange={e=>handleChange(w.id,'loginEnabled',e.target.checked)}/> ログイン許可</label>
                                     <button
                                         type="button"
                                         onClick={() => handleDelete(w.id)}
@@ -2113,169 +1869,27 @@
             );
         }
 
-        // --- MODAL: SECURITY & PASSKEY REGISTRATION SETTINGS ---
-        function SecuritySettingsModal({ authSettings, showToast, onClose, onSave }) {
-            const [form, setForm] = useState({ ...authSettings });
-            const [newPin, setNewPin] = useState(authSettings.pin);
-            const [isRegisteringPasskey, setIsRegisteringPasskey] = useState(false);
-
-            // REGISTER NEW PASSKEY (WebAuthn Create)
-            const handleRegisterPasskey = async () => {
-                setIsRegisteringPasskey(true);
+        // --- Self-service passkey enrollment using Supabase Auth ---
+        function SecuritySettingsModal({ currentWorker, showToast, onClose }) {
+            const [busy,setBusy]=useState(false);
+            const handleRegister = async () => {
+                setBusy(true);
                 try {
-                    if (!window.PublicKeyCredential) {
-                        alert('お使いのブラウザはパスキー（WebAuthn）非対応です');
-                        setIsRegisteringPasskey(false);
-                        return;
-                    }
-
-                    const challenge = new Uint8Array(32);
-                    window.crypto.getRandomValues(challenge);
-
-                    const userId = new Uint8Array(16);
-                    window.crypto.getRandomValues(userId);
-
-                    const createOptions = {
-                        publicKey: {
-                            rp: { name: "作業員一括Web予定表" },
-                            user: {
-                                id: userId,
-                                name: "admin@schedule.app",
-                                displayName: "管理者アカウント"
-                            },
-                            challenge: challenge,
-                            pubKeyCredParams: [{ alg: -7, type: "public-key" }, { alg: -257, type: "public-key" }],
-                            timeout: 60000,
-                            authenticatorSelection: {
-                                authenticatorAttachment: "platform",
-                                userVerification: "preferred"
-                            }
-                        }
-                    };
-
-                    const credential = await navigator.credentials.create(createOptions);
-
-                    if (credential) {
-                        const credIdBase64 = bufferToBase64(credential.rawId);
-                        
-                        // Save to Supabase worker_passkeys
-                        if (supabase) {
-                            await supabase.from('worker_passkeys').upsert({
-                                credential_id: credIdBase64,
-                                user_handle: "admin@schedule.app",
-                                public_key: credIdBase64,
-                                created_at: new Date().toISOString()
-                            });
-                        }
-
-                        showToast('この端末のパスキー（Windows Hello / Touch ID）を正常に登録しました！');
-                    }
-                } catch (err) {
-                    console.error('Register Passkey Error:', err);
-                    if (err.name !== 'NotAllowedError') {
-                        showToast(`パスキー登録失敗: ${err.message}`, 'error');
-                    }
-                } finally {
-                    setIsRegisteringPasskey(false);
-                }
+                    const {error}=await supabase.auth.registerPasskey();
+                    if(error)throw error;
+                    showToast('パスキーをこのアカウントに登録しました');
+                } catch(e) {showToast('登録できませんでした: '+e.message,'error');}
+                finally {setBusy(false);}
             };
-
-            const handleSubmit = (e) => {
-                e.preventDefault();
-                onSave({
-                    ...form,
-                    pin: newPin
-                });
-            };
-
-            return (
-                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-                    <div className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-150">
-                        <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between">
-                            <h3 className="font-bold text-sm sm:text-base flex items-center gap-2">
-                                <Icon name="shield" className="w-5 h-5 text-emerald-400" />
-                                セキュリティ＆パスキー管理
-                            </h3>
-                            <button onClick={onClose} className="text-slate-400 hover:text-white font-bold">✕</button>
-                        </div>
-
-                        <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
-                            {/* Passkey Registration Button */}
-                            <div className="p-3.5 bg-brand-50 border border-brand-200 rounded-xl space-y-2">
-                                <div className="font-bold text-brand-900 flex items-center gap-1.5 text-xs">
-                                    <Icon name="fingerprint" className="w-4 h-4 text-brand-600" />
-                                    この端末をパスキー（Passkey）として登録
-                                </div>
-                                <p className="text-[11px] text-brand-800">
-                                    Windows Hello / スマホの生体認証（指紋・顔）を登録し、パスワードなしで高速ログインできるようにします。
-                                </p>
-                                <button
-                                    type="button"
-                                    onClick={handleRegisterPasskey}
-                                    disabled={isRegisteringPasskey}
-                                    className="w-full py-2 bg-brand-600 hover:bg-brand-500 text-white font-bold rounded-lg transition shadow-xs flex items-center justify-center gap-1.5"
-                                >
-                                    <Icon name="key" className="w-4 h-4" />
-                                    {isRegisteringPasskey ? '端末キー生成中...' : '現在の端末でパスキーを作成・保存'}
-                                </button>
-                            </div>
-
-                            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
-                                <label className="flex items-center justify-between cursor-pointer">
-                                    <div>
-                                        <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                                            <Icon name="fingerprint" className="w-4 h-4 text-brand-600" />
-                                            パスキー生体認証を優先する
-                                        </div>
-                                        <div className="text-[11px] text-slate-500">ログイン時にパスキー照合ダイアログを自動起動します</div>
-                                    </div>
-                                    <input
-                                        type="checkbox"
-                                        checked={form.useBiometrics}
-                                        onChange={(e) => setForm({ ...form, useBiometrics: e.target.checked })}
-                                        className="w-4 h-4 text-brand-600 rounded focus:ring-brand-500"
-                                    />
-                                </label>
-
-                                <hr className="border-slate-200" />
-
-                                <label className="flex items-center justify-between cursor-pointer">
-                                    <div>
-                                        <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                                            <Icon name="key" className="w-4 h-4 text-brand-600" />
-                                            2段階認証 (OTPコード入力)
-                                        </div>
-                                        <div className="text-[11px] text-slate-500">暗証番号の入力後にワンタイムコード出力を要求します</div>
-                                    </div>
-                                    <input
-                                        type="checkbox"
-                                        checked={form.use2FA}
-                                        onChange={(e) => setForm({ ...form, use2FA: e.target.checked })}
-                                        className="w-4 h-4 text-brand-600 rounded focus:ring-brand-500"
-                                    />
-                                </label>
-                            </div>
-
-                            <div>
-                                <label className="block text-slate-700 font-bold mb-1">暗証番号 (PIN) の変更</label>
-                                <input
-                                    type="text"
-                                    maxLength="8"
-                                    value={newPin}
-                                    onChange={(e) => setNewPin(e.target.value)}
-                                    className="w-full border border-slate-300 rounded-lg p-2 font-mono font-bold text-slate-800 focus:ring-2 focus:ring-brand-500"
-                                />
-                                <span className="text-[10px] text-slate-400">※ログイン認証時に使用する4〜8桁の暗証番号です</span>
-                            </div>
-
-                            <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
-                                <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg text-slate-700 font-bold">キャンセル</button>
-                                <button type="submit" className="px-5 py-2 bg-brand-600 text-white rounded-lg font-bold hover:bg-brand-500">設定変更を保存</button>
-                            </div>
-                        </form>
-                    </div>
+            return <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-50">
+                <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md space-y-4">
+                    <h3 className="font-bold">自分のパスキー登録</h3>
+                    <p className="text-sm">{currentWorker?.name} のログイン用パスキーを追加登録します。</p>
+                    <p className="text-xs text-slate-600">複数のPC・スマートフォンで登録可能です。必ずHTTPSで開いてください。</p>
+                    <button disabled={busy} onClick={handleRegister} className="px-4 py-2 rounded-lg bg-brand-600 text-white font-bold">{busy?'登録中...':'この端末でパスキーを登録'}</button>
+                    <button onClick={onClose} className="ml-3 px-4 py-2 rounded-lg border">閉じる</button>
                 </div>
-            );
+            </div>;
         }
 
         // --- MODAL: EXPORT / IMPORT DATA ---
