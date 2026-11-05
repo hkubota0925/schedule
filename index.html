@@ -226,6 +226,8 @@
 
             // --- COPY, PASTE & UNDO HISTORY STATES ---
             const [copiedSchedule, setCopiedSchedule] = useState(null);
+            const [clipboardMode, setClipboardMode] = useState('copy'); // copy / cut
+            const moveInProgress = useRef(false);
             const [selectedScheduleId, setSelectedScheduleId] = useState(null);
             const [activeCell, setActiveCell] = useState(null); // { workerId, timeSlot }
             const [historyStack, setHistoryStack] = useState([]); // Stack of actions for Ctrl+Z Undo
@@ -341,7 +343,7 @@
                 return () => subscription.unsubscribe();
             }, []);
 
-            // --- KEYBOARD SHORTCUTS (Ctrl+C / Ctrl+V / Delete / Ctrl+Z) ---
+            // --- KEYBOARD SHORTCUTS (Ctrl+C / Ctrl+X / Ctrl+V / Delete / Ctrl+Z) ---
             useEffect(() => {
                 const handleKeyDown = (e) => {
                     const activeElement = document.activeElement;
@@ -373,16 +375,31 @@
                             if (target) {
                                 e.preventDefault();
                                 setCopiedSchedule(target);
-                                showToast(`予定「${target.title}」をコピーしました。(Ctrl+V でセルに貼り付け可)`, 'info');
+                                setClipboardMode('copy');
+                                showToast(`予定「${target.title}」をコピーしました。(Ctrl+V で貼り付け)`, 'info');
                             }
                         }
+                    }
+
+                    // Ctrl + X: 元の予定は貼り付け成功時まで残す
+                    if (isCmdOrCtrl && e.key.toLowerCase() === 'x') {
+                        if (selectedScheduleId) {
+                            const target = schedules.find(s => s.id === selectedScheduleId);
+                            if (target) {
+                                e.preventDefault();
+                                setCopiedSchedule(target);
+                                setClipboardMode('cut');
+                                showToast(`予定「${target.title}」を切り取りました。移動先セルで Ctrl+V`, 'info');
+                            }
+                        }
+                        return;
                     }
 
                     // Ctrl + V
                     if (isCmdOrCtrl && e.key.toLowerCase() === 'v') {
                         if (copiedSchedule && activeCell) {
                             e.preventDefault();
-                            handlePasteSchedule(copiedSchedule, activeCell.workerId, activeCell.timeSlot);
+                            handlePasteClipboard(copiedSchedule, activeCell.workerId, activeCell.timeSlot);
                         } else if (copiedSchedule && !activeCell) {
                             showToast(`貼り付け先のセル（作業員と時間帯）をクリックして選択してください`, 'error');
                         }
@@ -397,7 +414,7 @@
 
                 window.addEventListener('keydown', handleKeyDown);
                 return () => window.removeEventListener('keydown', handleKeyDown);
-            }, [selectedScheduleId, copiedSchedule, activeCell, schedules, historyStack, canEdit]);
+            }, [selectedScheduleId, copiedSchedule, clipboardMode, activeCell, schedules, historyStack, canEdit]);
 
             // --- UNDO (Ctrl+Z) HANDLER ---
             const handleUndo = async () => {
@@ -574,6 +591,61 @@
                 setEditingSchedule(null);
             };
 
+            // 共通の予定移動処理: ドラッグ/切り取りとも同じIDをUPDATEし、成功後に画面へ反映
+            const handleMoveSchedule = async (scheduleId, targetWorkerId, targetTimeSlot, via = 'drag') => {
+                if (!canEdit || moveInProgress.current) return false;
+                const original = schedules.find(s => s.id === scheduleId);
+                if (!original) {
+                    showToast('移動元の予定が見つかりません。データを再読み込みしてください。', 'error');
+                    return false;
+                }
+                // タイムラインは1時間セル。元の開始時刻の「分」は維持する。
+                const minute = original.startTime.split(':')[1] || '00';
+                const nextStart = `${targetTimeSlot.split(':')[0]}:${minute}`;
+                const duration = getDurationMinutes(original.startTime, original.endTime);
+                const startMinutes = Number(nextStart.slice(0,2)) * 60 + Number(minute);
+                if (startMinutes + duration >= 24 * 60) {
+                    showToast('日付をまたぐ移動には対応していません。終了時刻を確認してください。', 'error');
+                    return false;
+                }
+                const updated = { ...original, workerId: String(targetWorkerId), date: selectedDate,
+                    startTime: nextStart, endTime: addMinutes(nextStart, duration) };
+                if (updated.workerId === original.workerId && updated.date === original.date &&
+                    updated.startTime === original.startTime && updated.endTime === original.endTime) {
+                    if (via === 'cut') { setCopiedSchedule(null); setClipboardMode('copy'); }
+                    return true;
+                }
+                moveInProgress.current = true;
+                try {
+                    if (!supabase) throw new Error('Supabaseに接続されていません');
+                    const { data, error } = await supabase.from('schedules')
+                        .update({ work_date: updated.date, worker_id: updated.workerId,
+                            start_time: updated.startTime, end_time: updated.endTime })
+                        .eq('schedule_id', original.id).eq('is_deleted', false)
+                        .select('schedule_id');
+                    if (error) throw error;
+                    if (!data || data.length !== 1) throw new Error('更新対象が見つからないか、更新権限がありません');
+                    setSchedules(prev => prev.map(s => s.id === original.id ? updated : s));
+                    setHistoryStack(prev => [...prev.slice(-29),
+                        { type: 'UPDATE', prevSchedule: original, newSchedule: updated }]);
+                    setSelectedScheduleId(original.id);
+                    const who = workers.find(w => String(w.id) === String(targetWorkerId));
+                    showToast(`「${original.title}」を ${who?.name || targetWorkerId} / ${nextStart} へ移動しました`);
+                    if (via === 'cut') { setCopiedSchedule(null); setClipboardMode('copy'); }
+                    return true;
+                } catch(err) {
+                    showToast(`予定の移動に失敗: ${err.message}`, 'error');
+                    return false;
+                } finally { moveInProgress.current = false; }
+            };
+
+            const handlePasteClipboard = (schedule, workerId, timeSlot) => {
+                if (!schedule) return;
+                return clipboardMode === 'cut'
+                    ? handleMoveSchedule(schedule.id, workerId, timeSlot, 'cut')
+                    : handlePasteSchedule(schedule, workerId, timeSlot);
+            };
+
             // Copy & Paste Schedule
             const handlePasteSchedule = async (sourceSchedule, targetWorkerId, targetTimeSlot) => {
                 if (!canEdit) return;
@@ -627,6 +699,7 @@
                 setHistoryStack(prev => [...prev.slice(-29), { type: 'DELETE', deletedSchedules: [target] }]);
                 setSchedules(prev => prev.filter(s => s.id !== id));
                 if (selectedScheduleId === id) setSelectedScheduleId(null);
+                if (copiedSchedule?.id === id) { setCopiedSchedule(null); setClipboardMode('copy'); }
 
                 showToast(`予定「${target.title}」を削除しました`);
 
@@ -727,7 +800,7 @@
                                 <span className="w-2.5 h-2.5 rounded-full bg-brand-400 animate-ping" />
                                 <Icon name="clipboard" className="w-4 h-4 text-brand-400" />
                                 <div>
-                                    <span className="text-slate-400 text-[11px]">コピー中: </span>
+                                    <span className="text-slate-400 text-[11px]">{clipboardMode === 'cut' ? '切り取り中: ' : 'コピー中: '}</span>
                                     <span className="font-bold text-brand-200">「{copiedSchedule.title}」</span>
                                 </div>
                             </div>
@@ -736,10 +809,10 @@
                                     セル選択 + Ctrl+V
                                 </span>
                                 <button
-                                    onClick={() => setCopiedSchedule(null)}
+                                    onClick={() => { setCopiedSchedule(null); setClipboardMode('copy'); }}
                                     className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[10px] font-bold transition"
                                 >
-                                    コピー解除
+                                    {clipboardMode === 'cut' ? '切り取り解除' : 'コピー解除'}
                                 </button>
                             </div>
                         </div>
@@ -760,6 +833,7 @@
                                         const target = schedules.find(s => s.id === selectedScheduleId);
                                         if (target) {
                                             setCopiedSchedule(target);
+                                            setClipboardMode('copy');
                                             showToast(`「${target.title}」をコピーしました。`, 'info');
                                         }
                                     }}
@@ -767,6 +841,18 @@
                                 >
                                     <Icon name="copy" className="w-3.5 h-3.5" />
                                     コピー (Ctrl+C)
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        const target = schedules.find(s => s.id === selectedScheduleId);
+                                        if (!target) return;
+                                        setCopiedSchedule(target);
+                                        setClipboardMode('cut');
+                                        showToast(`「${target.title}」を切り取りました。移動先セルを選択してください。`, 'info');
+                                    }}
+                                    className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-[11px] font-bold transition"
+                                >
+                                    切り取り (Ctrl+X)
                                 </button>
                                 <button
                                     onClick={() => handleDeleteSchedule(selectedScheduleId)}
@@ -988,18 +1074,21 @@
                                 selectedDate={selectedDate}
                                 selectedScheduleId={selectedScheduleId}
                                 copiedSchedule={copiedSchedule}
+                                canEdit={canEdit}
+                                onMoveSchedule={handleMoveSchedule}
                                 activeCell={activeCell}
                                 onSelectSchedule={(id) => canEdit && setSelectedScheduleId(id)}
                                 onCopySchedule={(sched) => {
                                     if (!canEdit) return;
                                     setCopiedSchedule(sched);
+                                    setClipboardMode('copy');
                                     showToast(`「${sched.title}」をコピーしました。(Ctrl+V で貼り付け)`, 'info');
                                 }}
                                 onCellClick={(workerId, timeSlot) => {
                                     if (!canEdit) return;
                                     setActiveCell({ workerId, timeSlot });
                                     if (copiedSchedule) {
-                                        handlePasteSchedule(copiedSchedule, workerId, timeSlot);
+                                        handlePasteClipboard(copiedSchedule, workerId, timeSlot);
                                     } else {
                                         setEditingSchedule({
                                             date: selectedDate,
@@ -1111,24 +1200,35 @@
             const [sent, setSent] = useState(false);
             const [busy, setBusy] = useState(false);
             const [msg, setMsg] = useState('');
+            const readableAuthError = (error) => {
+                const message = String(error?.message || '');
+                const code = String(error?.code || '').toLowerCase();
+                if (/registration not permitted|user not allowed|signups not allowed|not authorized|not permitted/i.test(message)
+                    || ['signup_disabled', 'user_banned'].includes(code)) {
+                    return 'このメールアドレスは作業員マスタに登録されていないか、ログインが許可されていません。';
+                }
+                if (/email rate limit exceeded/i.test(message)) return 'メール送信の制限に達しました。時間をおいてから再度お試しください。';
+                if (/credential verification failed/i.test(message)) return 'パスキーの検証に失敗しました。新方式で登録したパスキーか確認してください。';
+                return message || '認証に失敗しました';
+            };
             const run = async (fn) => {
                 setBusy(true); setMsg('');
-                try { await fn(); } catch(e) { setMsg(e.message || '認証に失敗しました'); }
+                try { await fn(); } catch(e) { setMsg(readableAuthError(e)); }
                 finally { setBusy(false); }
             };
             return <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
                 <div className="w-full max-w-md bg-slate-900 text-white rounded-2xl p-8 space-y-5">
                     <h2 className="text-xl font-bold">作業員一括Web予定表</h2>
-                    <p className="text-xs text-slate-400">作業員マスタに登録済みの本人だけが利用できます。</p>
+                    <p className="text-xs text-slate-400">作業員マスタにメール登録・ログイン許可済みの本人だけが利用できます。</p>
                     <button disabled={busy} onClick={()=>run(async()=>{
                         const { error } = await supabase.auth.signInWithPasskey();
                         if(error) throw error;
                         await onSuccess();
                     })} className="w-full py-3 rounded-xl bg-brand-600 font-bold">パスキーでログイン</button>
-                    <div className="text-xs text-slate-400">初回登録・パスキーがない場合：登録済みメールアドレスで認証</div>
+                    <div className="text-xs text-slate-400">初回登録・パスキーがない場合：管理者が作業員マスタに事前登録したメールアドレスで認証</div>
                     <form className="space-y-3" onSubmit={e=>{e.preventDefault();run(async()=>{
                         if(!sent) {
-                            const {error}=await supabase.auth.signInWithOtp({email:email.trim(),options:{shouldCreateUser:true}});
+                            const {error}=await supabase.auth.signInWithOtp({email:email.trim(),options:{shouldCreateUser:true,emailRedirectTo:window.location.origin+window.location.pathname}});
                             if(error)throw error;
                             setSent(true);setMsg('確認コードをメールに送信しました。メール内のリンクの場合はリンクを開いてください。');
                         } else {
@@ -1150,7 +1250,20 @@
         }
 
         // --- TIMELINE VIEW ---
-        function TimelineView({ workers, schedules, searchQuery, density, conflictsMap, selectedDate, selectedScheduleId, copiedSchedule, activeCell, onSelectSchedule, onCopySchedule, onCellClick, onScheduleClick }) {
+        function TimelineView({ workers, schedules, searchQuery, density, conflictsMap, selectedDate, selectedScheduleId, copiedSchedule, canEdit, onMoveSchedule, activeCell, onSelectSchedule, onCopySchedule, onCellClick, onScheduleClick }) {
+            const [dragOverCell, setDragOverCell] = useState(null);
+            const [dragScheduleId, setDragScheduleId] = useState(null);
+            const dragOrigin = useRef(null);
+            const onCellDrop = (e, workerId, slot) => {
+                if (!canEdit) return;
+                e.preventDefault();
+                e.stopPropagation();
+                const id = e.dataTransfer.getData('application/x-schedule-id') || dragOrigin.current;
+                setDragOverCell(null);
+                setDragScheduleId(null);
+                dragOrigin.current = null;
+                if (id) onMoveSchedule(id, workerId, slot);
+            };
             const filteredWorkers = useMemo(() => {
                 if (!searchQuery) return workers;
                 const q = searchQuery.toLowerCase();
@@ -1171,7 +1284,7 @@
                             <span className="text-slate-400">|</span>
                             <span className="text-slate-600 flex items-center gap-1 flex-wrap">
                                 <Icon name="copy" className="w-3.5 h-3.5 text-brand-600 shrink-0" />
-                                クリック選択 ➔ <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Delete</kbd> 削除 / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+C</kbd> コピー / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+V</kbd> 貼り付け / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+Z</kbd> Undo
+                                クリック選択 ➔ <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Delete</kbd> 削除 / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+C</kbd> コピー / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+X</kbd> 切り取り / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+V</kbd> 貼り付け / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+Z</kbd> Undo / ドラッグで時刻・担当者を移動
                             </span>
                         </div>
                         <div className="flex items-center space-x-3 text-[11px]">
@@ -1239,9 +1352,19 @@
                                                     <td
                                                         key={slot}
                                                         onClick={() => onCellClick(worker.id, slot)}
+                                                        onDragOver={e => {
+                                                            if (!canEdit || !dragOrigin.current) return;
+                                                            e.preventDefault();
+                                                            e.dataTransfer.dropEffect = 'move';
+                                                            setDragOverCell(`${worker.id}|${slot}`);
+                                                        }}
+                                                        onDragLeave={e => {
+                                                            if (!e.currentTarget.contains(e.relatedTarget)) setDragOverCell(null);
+                                                        }}
+                                                        onDrop={e => onCellDrop(e, worker.id, slot)}
                                                         className={`border-r border-slate-200/70 p-0.5 relative cursor-pointer hover:bg-brand-50/60 transition ${
                                                             density === 'compact' ? 'h-9' : 'h-14'
-                                                        } ${isCellActive ? 'selected-cell' : ''}`}
+                                                        } ${isCellActive ? 'selected-cell' : ''} ${dragOverCell === `${worker.id}|${slot}` ? 'bg-emerald-100 outline outline-2 outline-emerald-500 outline-offset-[-2px]' : ''}`}
                                                     >
                                                         {matches.map(sched => {
                                                             const isStart = parseInt(sched.startTime.split(':')[0], 10) === slotHour;
@@ -1255,6 +1378,20 @@
                                                             return (
                                                                 <div
                                                                     key={sched.id}
+                                                                    draggable={canEdit}
+                                                                    title={canEdit ? 'ドラッグで担当者・時間帯を移動（作業時間は維持）' : undefined}
+                                                                    onDragStart={e => {
+                                                                        if (!canEdit) { e.preventDefault(); return; }
+                                                                        dragOrigin.current = sched.id;
+                                                                        setDragScheduleId(sched.id);
+                                                                        e.dataTransfer.effectAllowed = 'move';
+                                                                        e.dataTransfer.setData('application/x-schedule-id', sched.id);
+                                                                    }}
+                                                                    onDragEnd={() => {
+                                                                        dragOrigin.current = null;
+                                                                        setDragScheduleId(null);
+                                                                        setDragOverCell(null);
+                                                                    }}
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
                                                                         onSelectSchedule(sched.id);
@@ -1265,7 +1402,7 @@
                                                                     }}
                                                                     className={`w-full h-full p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:scale-[1.02] transition relative group/card ${statusBg} ${
                                                                         isSelected ? 'ring-2 ring-yellow-400 ring-offset-1 z-10' : ''
-                                                                    } ${isCopied ? 'copied-ring' : ''}`}
+                                                                    } ${isCopied ? 'copied-ring' : ''} ${dragScheduleId === sched.id ? 'opacity-50' : ''} ${canEdit ? 'cursor-grab active:cursor-grabbing' : ''}`}
                                                                 >
                                                                     <div className="flex items-center justify-between w-full">
                                                                         {isStart ? (
@@ -1875,6 +2012,14 @@
             const handleRegister = async () => {
                 setBusy(true);
                 try {
+                    const {data:{user},error:userError}=await supabase.auth.getUser();
+                    if(userError || !user || !currentWorker) throw new Error('ログイン済みの許可ユーザーのみパスキーを登録できます');
+                    const {data:worker,error:workerError}=await supabase.from('workers')
+                        .select('worker_id,login_email,login_enabled,auth_user_id,is_deleted')
+                        .eq('auth_user_id',user.id).eq('is_deleted',false).maybeSingle();
+                    if(workerError || !worker || !worker.login_enabled ||
+                       worker.login_email?.toLowerCase().trim() !== user.email?.toLowerCase().trim())
+                        throw new Error('作業員マスタでの本人確認・ログイン許可がありません');
                     const {error}=await supabase.auth.registerPasskey();
                     if(error)throw error;
                     showToast('パスキーをこのアカウントに登録しました');
@@ -1885,7 +2030,7 @@
                 <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md space-y-4">
                     <h3 className="font-bold">自分のパスキー登録</h3>
                     <p className="text-sm">{currentWorker?.name} のログイン用パスキーを追加登録します。</p>
-                    <p className="text-xs text-slate-600">複数のPC・スマートフォンで登録可能です。必ずHTTPSで開いてください。</p>
+                    <p className="text-xs text-slate-600">複数のPC・スマートフォンで登録可能です。1Password・Google パスワード マネージャー・Apple パスワード等の保存先は端末やブラウザの標準画面で選択します。必ずHTTPSで開いてください。</p>
                     <button disabled={busy} onClick={handleRegister} className="px-4 py-2 rounded-lg bg-brand-600 text-white font-bold">{busy?'登録中...':'この端末でパスキーを登録'}</button>
                     <button onClick={onClose} className="ml-3 px-4 py-2 rounded-lg border">閉じる</button>
                 </div>
