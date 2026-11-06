@@ -1583,14 +1583,14 @@
                     </div>
 
                     <div className="overflow-x-auto">
-                        <table className="w-full border-collapse text-left text-xs min-w-[1100px]">
+                        <table className="border-collapse text-left text-xs table-fixed" style={{width:`${190 + TIME_SLOTS.length * 110}px`, minWidth:`${190 + TIME_SLOTS.length * 110}px`}}>
                             <thead>
                                 <tr className="bg-slate-800 text-slate-200 uppercase font-semibold border-b border-slate-700">
-                                    <th className="py-2.5 px-3 sticky left-0 bg-slate-800 z-20 w-48 border-r border-slate-700 shadow-sm">
+                                    <th className="py-2.5 px-3 sticky left-0 bg-slate-800 z-20 border-r border-slate-700 shadow-sm" style={{width:190,minWidth:190,maxWidth:190}}>
                                         作業員氏名・職種 ({filteredWorkers.length}名)
                                     </th>
                                     {TIME_SLOTS.map(slot => (
-                                        <th key={slot} className="py-2 px-1 text-center font-mono border-r border-slate-700/60 min-w-[70px]">
+                                        <th key={slot} className="py-2 px-1 text-center font-mono border-r border-slate-700/60" style={{width:110,minWidth:110,maxWidth:110}}>
                                             {slot}
                                         </th>
                                     ))}
@@ -1605,9 +1605,9 @@
                                         if (resizePreview?.id !== s.id) return s;
                                         return {...s, [resizePreview.edge === 'start' ? 'startTime' : 'endTime']:resizePreview.value};
                                     }));
-                                    const barHeight = density === 'compact' ? 29 : 37;
+                                    const barHeight = 50;
                                     const laneStep = barHeight + 4;
-                                    const rowHeight = Math.max(density === 'compact' ? 38 : 58, laneLayout.count * laneStep + 5);
+                                    const rowHeight = Math.max(58, laneLayout.count * laneStep + 7);
 
                                     return (
                                         <tr key={worker.id} className="hover:bg-slate-50/80 transition group">
@@ -1633,133 +1633,95 @@
                                                 </div>
                                             </td>
 
-                                            {TIME_SLOTS.map((slot) => {
-                                                // 1時間セルへの予定描画は「分」単位で重なり判定する。
-                                                // 例: 17:30終了なら17:00セルの左半分まで表示する。
-                                                const slotStart = slotHourToMinutes(slot);
-                                                const slotEnd = slotStart + 60;
-                                                const matches = workerSchedules.map(s => resizePreview?.id === s.id
-                                                    ? {...s, [resizePreview.edge === 'start' ? 'startTime' : 'endTime']:resizePreview.value}
-                                                    : s).filter(s => {
-                                                    const start = slotHourToMinutes(s.startTime);
-                                                    const end = slotHourToMinutes(s.endTime);
-                                                    return Number.isFinite(start) && Number.isFinite(end) &&
-                                                        start < slotEnd && end > slotStart;
-                                                });
-
+                                            {TIME_SLOTS.map((slot, slotIndex) => {
                                                 const isCellActive = activeCell && String(activeCell.workerId) === String(worker.id) && activeCell.timeSlot === slot;
-
+                                                const displayedSchedules = workerSchedules.map(s => resizePreview?.id === s.id
+                                                    ? {...s, [resizePreview.edge === 'start' ? 'startTime' : 'endTime']:resizePreview.value}
+                                                    : s);
+                                                // バーは先頭の時間セルに1度だけ描画し、複数の時間セルをまたいで延ばす。
+                                                // 1時間あたり110pxの固定列幅を使用し、分単位の位置・幅を算出。
+                                                const timelineStart = slotHourToMinutes(TIME_SLOTS[0]);
+                                                const timelineEnd = timelineStart + TIME_SLOTS.length * 60;
+                                                const resolveDropSlot = e => {
+                                                    const tds = [...e.currentTarget.closest('tr').querySelectorAll('td[data-time-slot]')];
+                                                    const target = tds.find(td => { const r=td.getBoundingClientRect(); return e.clientX>=r.left && e.clientX<r.right; });
+                                                    return target?.dataset.timeSlot || slot;
+                                                };
                                                 return (
-                                                    <td
-                                                        key={slot}
-                                                        data-time-slot={slot}
-                                                        style={{height:`${rowHeight}px`, minWidth:'70px'}}
+                                                    <td key={slot} data-time-slot={slot}
+                                                        style={{height:`${rowHeight}px`, width:'110px', minWidth:'110px', maxWidth:'110px', overflow:'visible', zIndex:slotIndex === 0 ? 5 : 'auto'}}
                                                         onClick={() => onCellClick(worker.id, slot)}
                                                         onDragOver={e => {
                                                             if (!canEdit || !dragOrigin.current) return;
                                                             e.preventDefault();
                                                             e.dataTransfer.dropEffect = 'move';
-                                                            setDragOverCell(`${worker.id}|${slot}`);
+                                                            setDragOverCell(`${worker.id}|${resolveDropSlot(e)}`);
                                                         }}
-                                                        onDragLeave={e => {
-                                                            if (!e.currentTarget.contains(e.relatedTarget)) setDragOverCell(null);
-                                                        }}
-                                                        onDrop={e => onCellDrop(e, worker.id, slot)}
-                                                        className={`border-r border-slate-200/70 p-0.5 relative cursor-pointer hover:bg-brand-50/60 transition ${
-                                                            density === 'compact' ? 'h-9' : 'h-14'
-                                                        } ${isCellActive ? 'selected-cell' : ''} ${dragOverCell === `${worker.id}|${slot}` ? 'bg-emerald-100 outline outline-2 outline-emerald-500 outline-offset-[-2px]' : ''}`}
+                                                        onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragOverCell(null); }}
+                                                        onDrop={e => onCellDrop(e,worker.id,resolveDropSlot(e))}
+                                                        className={`border-r border-slate-200/70 relative p-0 cursor-pointer hover:bg-brand-50/60 ${isCellActive ? 'selected-cell' : ''} ${dragOverCell === `${worker.id}|${slot}` ? 'bg-emerald-100 outline outline-2 outline-emerald-500 outline-offset-[-2px]' : ''}`}
                                                     >
-                                                        {/* 分単位の目盛り。セル中央の点線は30分位置。 */}
                                                         <div className="absolute inset-y-0 left-1/2 border-l border-dashed border-slate-200 pointer-events-none" aria-hidden="true" />
-                                                        {matches.map(sched => {
+                                                        {slotIndex === 0 && displayedSchedules.map(sched => {
                                                             const startMinutes = slotHourToMinutes(sched.startTime);
                                                             const endMinutes = slotHourToMinutes(sched.endTime);
-                                                            const visibleStart = Math.max(slotStart, startMinutes);
-                                                            const visibleEnd = Math.min(slotEnd, endMinutes);
-                                                            const leftPct = (visibleStart - slotStart) / 60 * 100;
-                                                            const widthPct = (visibleEnd - visibleStart) / 60 * 100;
-                                                            const isStart = startMinutes >= slotStart && startMinutes < slotEnd;
+                                                            if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= timelineStart || startMinutes >= timelineEnd) return null;
+                                                            const barStart = Math.max(timelineStart,startMinutes);
+                                                            const barEnd = Math.min(timelineEnd,endMinutes);
+                                                            if (barEnd<=barStart) return null;
+                                                            const leftPx = (barStart-timelineStart)/60*110;
+                                                            const widthPx = (barEnd-barStart)/60*110;
                                                             const isSelected = selectedScheduleId === sched.id;
-                                                            const isCopied = copiedSchedule && copiedSchedule.id === sched.id;
-
-
+                                                            const isCopied = copiedSchedule?.id === sched.id;
+                                                            const fullLabel = `${sched.startTime}～${sched.endTime}  ${sched.title || ''}  ${sched.location || ''}\n${sched.notes || ''}`;
                                                             return (
-                                                                <div
-                                                                    key={sched.id}
+                                                                <div key={sched.id}
                                                                     draggable={canEdit}
-                                                                    title={`${sched.startTime}～${sched.endTime} ${sched.title}${canEdit ? '（ドラッグで移動）' : ''}`}
+                                                                    title={fullLabel}
                                                                     onDragStart={e => {
-                                                                        if (!canEdit) { e.preventDefault(); return; }
-                                                                        dragOrigin.current = sched.id;
+                                                                        if (!canEdit) {e.preventDefault();return;}
+                                                                        dragOrigin.current=sched.id;
                                                                         setDragScheduleId(sched.id);
-                                                                        e.dataTransfer.effectAllowed = 'move';
-                                                                        e.dataTransfer.setData('application/x-schedule-id', sched.id);
+                                                                        e.dataTransfer.effectAllowed='move';
+                                                                        e.dataTransfer.setData('application/x-schedule-id',sched.id);
                                                                     }}
-                                                                    onDragEnd={() => {
-                                                                        dragOrigin.current = null;
-                                                                        setDragScheduleId(null);
-                                                                        setDragOverCell(null);
+                                                                    onDragEnd={() => { dragOrigin.current=null;setDragScheduleId(null);setDragOverCell(null); }}
+                                                                    onDragOver={e => { if (canEdit && dragOrigin.current) e.preventDefault(); }}
+                                                                    onDrop={e => {
+                                                                        if (!canEdit) return;
+                                                                        const tds=[...e.currentTarget.closest('tr').querySelectorAll('td[data-time-slot]')];
+                                                                        const target=tds.find(td=>{const r=td.getBoundingClientRect();return e.clientX>=r.left&&e.clientX<r.right;});
+                                                                        if(target) onCellDrop(e,worker.id,target.dataset.timeSlot);
                                                                     }}
-                                                                    onContextMenu={e => openColorMenu(e, sched)}
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        onSelectSchedule(sched.id);
-                                                                    }}
-                                                                    onDoubleClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        onScheduleClick(sched);
-                                                                    }}
-                                                                    style={{ left: `${leftPct}%`, width: `${widthPct}%`, top:`${3 + (laneLayout.byId[sched.id] || 0) * laneStep}px`, bottom:'auto', height:`${barHeight}px`, backgroundColor: getScheduleColor(sched.scheduleColor), color: '#FFFFFF' }}
-                                                                    className={`absolute p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:brightness-110 transition group/card ${
-                                                                        isSelected ? 'ring-2 ring-yellow-400 ring-offset-1 z-10' : ''
-                                                                    } ${isCopied ? 'copied-ring' : ''} ${dragScheduleId === sched.id ? 'opacity-50' : ''} ${canEdit ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                                                                    onContextMenu={e=>openColorMenu(e,sched)}
+                                                                    onClick={e=>{e.stopPropagation();onSelectSchedule(sched.id);}}
+                                                                    onDoubleClick={e=>{e.stopPropagation();onScheduleClick(sched);}}
+                                                                    style={{left:`${leftPx}px`,width:`${widthPx}px`,top:`${4+(laneLayout.byId[sched.id]||0)*laneStep}px`,height:`${barHeight}px`,backgroundColor:getScheduleColor(sched.scheduleColor),color:'#FFFFFF',zIndex:isSelected?12:7}}
+                                                                    className={`absolute rounded-md px-2 py-1 text-[11px] leading-[1.35] font-medium shadow-sm hover:brightness-110 group/card ${isSelected?'ring-2 ring-yellow-400 ring-offset-1':''} ${isCopied?'copied-ring':''} ${dragScheduleId===sched.id?'opacity-50':''} ${canEdit?'cursor-grab active:cursor-grabbing':''}`}
                                                                 >
-                                                                    {canEdit && isStart && <div
+                                                                    {canEdit && startMinutes >= timelineStart && startMinutes < timelineEnd && <div
                                                                         title="左端をドラッグして開始時刻を変更（15分単位）"
-                                                                        onPointerDown={e => beginResize(e, sched, 'start')}
-                                                                        draggable={false}
-                                                                        className="absolute left-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-20 rounded-l-md"
-                                                                        style={{touchAction:'none'}}
-                                                                    />}
-                                                                    {canEdit && endMinutes > slotStart && endMinutes <= slotEnd && <div
+                                                                        onPointerDown={e=>beginResize(e,sched,'start')}
+                                                                        draggable={false} style={{touchAction:'none'}}
+                                                                        className="absolute left-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-20 rounded-l-md" />}
+                                                                    {canEdit && endMinutes > timelineStart && endMinutes <= timelineEnd && <div
                                                                         title="右端をドラッグして終了時刻を変更（15分単位）"
-                                                                        onPointerDown={e => beginResize(e, sched, 'end')}
-                                                                        draggable={false}
-                                                                        className="absolute right-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-20 rounded-r-md"
-                                                                        style={{touchAction:'none'}}
-                                                                    />}
-                                                                    <div className="flex items-center justify-between w-full pl-1 pr-1">
-                                                                        {isStart ? (
-                                                                            <div className="font-bold truncate flex-1">
-                                                                                {sched.startTime} {sched.title}
-                                                                            </div>
-                                                                        ) : (
-                                                                            <div className="opacity-75 truncate text-[9px] flex-1">
-                                                                                ➔ {sched.title}
-                                                                            </div>
-                                                                        )}
-
-                                                                        <button
-                                                                            type="button"
-                                                                            onClick={(e) => {
-                                                                                e.stopPropagation();
-                                                                                onCopySchedule(sched);
-                                                                            }}
-                                                                            title="コピー (Ctrl+C)"
-                                                                            className="hidden group-hover/card:flex items-center justify-center p-0.5 bg-black/40 hover:bg-black/70 rounded text-white ml-0.5 shrink-0 transition"
-                                                                        >
+                                                                        onPointerDown={e=>beginResize(e,sched,'end')}
+                                                                        draggable={false} style={{touchAction:'none'}}
+                                                                        className="absolute right-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-20 rounded-r-md" />}
+                                                                    <div className="w-full flex gap-2 items-center pr-1 min-w-0">
+                                                                        <span className="font-bold truncate flex-1 min-w-0 whitespace-nowrap">{sched.startTime}～{sched.endTime}　{sched.title}　{sched.location}</span>
+                                                                        {canEdit && <button type="button" title="コピー (Ctrl+C)" draggable={false}
+                                                                            onClick={e=>{e.stopPropagation();onCopySchedule(sched);}}
+                                                                            className="hidden group-hover/card:flex shrink-0 items-center p-0.5 bg-black/30 hover:bg-black/60 rounded text-white">
                                                                             <Icon name="copy" className="w-3 h-3" />
-                                                                        </button>
+                                                                        </button>}
                                                                     </div>
+                                                                    <div className="truncate whitespace-nowrap opacity-90 text-[10px] pt-1" title={sched.notes||''}>{sched.notes || ' '}</div>
                                                                 </div>
                                                             );
                                                         })}
-
-                                                        {matches.length === 0 && copiedSchedule && isCellActive && (
-                                                            <div className="w-full h-full flex items-center justify-center text-[9px] text-brand-600 font-bold bg-brand-50 rounded border border-brand-300">
-                                                                貼り付け
-                                                            </div>
-                                                        )}
+                                                        {copiedSchedule && isCellActive && <div className="absolute bottom-0 left-0 text-[9px] text-blue-700 pointer-events-none">貼付先</div>}
                                                     </td>
                                                 );
                                             })}
