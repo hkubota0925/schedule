@@ -210,6 +210,23 @@
             badgeCls: 'bg-blue-100 text-blue-800 border-blue-300'
         }));
 
+        // Ver 1.09: 予定色は進捗状況と独立して管理します。
+        const DEFAULT_SCHEDULE_COLOR = '#475569';
+        const SCHEDULE_COLORS = [
+            { name: 'グレー', value: '#475569' },
+            { name: 'ブルー', value: '#2563EB' },
+            { name: 'ネイビー', value: '#1E40AF' },
+            { name: 'グリーン', value: '#15803D' },
+            { name: 'ティール', value: '#0F766E' },
+            { name: 'パープル', value: '#7C3AED' },
+            { name: 'レッド', value: '#DC2626' },
+            { name: 'オレンジ', value: '#C2410C' },
+            { name: 'ピンク', value: '#BE185D' },
+            { name: 'ブラウン', value: '#92400E' }
+        ];
+        const getScheduleColor = (color) =>
+            SCHEDULE_COLORS.some(item => item.value === color) ? color : DEFAULT_SCHEDULE_COLOR;
+
         // --- MAIN APP COMPONENT ---
         function App() {
             const [dbConnected, setDbConnected] = useState(false);
@@ -308,6 +325,7 @@
                             location: s.location || '',
                             priority: s.priority || 'medium',
                             status: s.status || 'not_started',
+                            scheduleColor: getScheduleColor(s.schedule_color),
                             category: s.category || 'work',
                             notes: s.notes || ''
                         }));
@@ -322,7 +340,7 @@
                 }
             };
 
-            // Ver 1.08: Supabase Authの「最終ログイン日時」が本日（ブラウザのローカル日付）
+            // Ver 1.09: Supabase Authの「最終ログイン日時」が本日（ブラウザのローカル日付）
             // である場合のみ利用を認める。トークンの自動更新は再ログインと扱わない。
             // ローカルストレージの任意のフラグだけでは再認証済みと見なさない。
             const signedInToday = (user) => {
@@ -529,6 +547,7 @@
                         worker_id: String(s.workerId), start_time: s.startTime,
                         end_time: s.endTime, title: s.title, location: s.location || '',
                         priority: s.priority || 'medium', status: s.status || 'not_started',
+                        schedule_color: getScheduleColor(s.scheduleColor),
                         notes: s.notes || '', is_deleted: false
                     }));
                     try {
@@ -560,6 +579,7 @@
                                 location: prev.location || '',
                                 priority: prev.priority || 'medium',
                                 status: prev.status || 'not_started',
+                                schedule_color: getScheduleColor(prev.scheduleColor),
                                 notes: prev.notes || '',
                                 is_deleted: false
                             });
@@ -594,6 +614,7 @@
                                 location: item.location || '',
                                 priority: item.priority || 'medium',
                                 status: item.status || 'not_started',
+                                schedule_color: getScheduleColor(item.scheduleColor),
                                 notes: item.notes || '',
                                 is_deleted: false
                             }));
@@ -646,7 +667,8 @@
                         date: scheduleData.date, startTime: scheduleData.startTime,
                         endTime: scheduleData.endTime, title: scheduleData.title,
                         location: scheduleData.location, priority: scheduleData.priority,
-                        status: scheduleData.status, category: scheduleData.category || 'work',
+                        status: scheduleData.status, scheduleColor: getScheduleColor(scheduleData.scheduleColor),
+                        category: scheduleData.category || 'work',
                         notes: scheduleData.notes
                     }));
                 } else if (isUpdate) {
@@ -668,6 +690,7 @@
                     end_time: entry.endTime, title: entry.title,
                     location: entry.location || '', priority: entry.priority || 'medium',
                     status: entry.status || 'not_started',
+                    schedule_color: getScheduleColor(entry.scheduleColor),
                     notes: entry.notes || '', is_deleted: false
                 });
                 try {
@@ -783,6 +806,7 @@
                             location: sourceSchedule.location || '',
                             priority: sourceSchedule.priority || 'medium',
                             status: sourceSchedule.status || 'not_started',
+                            schedule_color: getScheduleColor(sourceSchedule.scheduleColor),
                             notes: sourceSchedule.notes || '',
                             is_deleted: false
                         });
@@ -1009,6 +1033,7 @@
                                             endTime: '12:00',
                                             priority: 'medium',
                                             status: 'not_started',
+                                            scheduleColor: DEFAULT_SCHEDULE_COLOR,
                                             category: 'work'
                                         });
                                         setIsModalOpen(true);
@@ -1198,6 +1223,7 @@
                                             endTime: addMinutes(timeSlot, 120),
                                             priority: 'medium',
                                             status: 'not_started',
+                                            scheduleColor: DEFAULT_SCHEDULE_COLOR,
                                             category: 'work'
                                         });
                                         setIsModalOpen(true);
@@ -1486,9 +1512,6 @@
                                                             const isSelected = selectedScheduleId === sched.id;
                                                             const isCopied = copiedSchedule && copiedSchedule.id === sched.id;
 
-                                                            let statusBg = "bg-slate-600 text-white";
-                                                            if (sched.status === 'completed') statusBg = "bg-emerald-600 text-white";
-                                                            if (sched.status === 'in_progress') statusBg = "bg-brand-600 text-white";
 
                                                             return (
                                                                 <div
@@ -1515,8 +1538,8 @@
                                                                         e.stopPropagation();
                                                                         onScheduleClick(sched);
                                                                     }}
-                                                                    style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                                                                    className={`absolute top-0.5 bottom-0.5 p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:brightness-110 transition group/card ${statusBg} ${
+                                                                    style={{ left: `${leftPct}%`, width: `${widthPct}%`, backgroundColor: getScheduleColor(sched.scheduleColor), color: '#FFFFFF' }}
+                                                                    className={`absolute top-0.5 bottom-0.5 p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:brightness-110 transition group/card ${
                                                                         isSelected ? 'ring-2 ring-yellow-400 ring-offset-1 z-10' : ''
                                                                     } ${isCopied ? 'copied-ring' : ''} ${dragScheduleId === sched.id ? 'opacity-50' : ''} ${canEdit ? 'cursor-grab active:cursor-grabbing' : ''}`}
                                                                 >
@@ -1622,8 +1645,9 @@
                                                     ) : (
                                                         <div className="space-y-1">
                                                             {dayScheds.map(s => (
-                                                                <div key={s.id} className="p-1 bg-slate-100 rounded text-[10px] font-medium border border-slate-200 truncate">
-                                                                    <span className="font-mono text-brand-700 font-bold">{s.startTime}</span> {s.title}
+                                                                <div key={s.id} className="p-1 rounded text-[10px] font-medium truncate"
+                                                                    style={{ backgroundColor: getScheduleColor(s.scheduleColor), color: '#FFFFFF' }}>
+                                                                    <span className="font-mono font-bold">{s.startTime}</span> {s.title}
                                                                 </div>
                                                             ))}
                                                         </div>
@@ -1680,7 +1704,12 @@
                                     <tr key={s.id} className="hover:bg-slate-50 transition">
                                         <td className="p-3 font-mono font-bold text-slate-700">{s.startTime} - {s.endTime}</td>
                                         <td className="p-3 font-bold text-slate-900">{getWorkerName(s.workerId)}</td>
-                                        <td className="p-3 font-semibold text-slate-800">{s.title}</td>
+                                        <td className="p-3 font-semibold text-slate-800">
+                                            <span className="inline-flex items-center gap-2">
+                                                <span className="inline-block h-3 w-3 rounded-sm shrink-0" style={{ backgroundColor: getScheduleColor(s.scheduleColor) }} />
+                                                {s.title}
+                                            </span>
+                                        </td>
                                         <td className="p-3 text-slate-600">{s.location || '-'}</td>
                                         <td className="p-3">
                                             <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -1690,10 +1719,7 @@
                                             </span>
                                         </td>
                                         <td className="p-3">
-                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                                s.status === 'completed' ? 'bg-emerald-100 text-emerald-800' :
-                                                s.status === 'in_progress' ? 'bg-brand-100 text-brand-800' : 'bg-slate-100 text-slate-600'
-                                            }`}>
+                                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700">
                                                 {s.status === 'completed' ? '完了' : s.status === 'in_progress' ? '作業中' : '未着手'}
                                             </span>
                                         </td>
@@ -1791,6 +1817,7 @@
                 location: schedule?.location || '',
                 priority: schedule?.priority || 'medium',
                 status: schedule?.status || 'not_started',
+                scheduleColor: getScheduleColor(schedule?.scheduleColor),
                 notes: schedule?.notes || ''
             });
 
@@ -2017,6 +2044,25 @@
                                         <option value="completed">完了</option>
                                     </select>
                                 </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-slate-700 font-bold mb-1">予定ボックスの色</label>
+                                <div className="flex items-center gap-3">
+                                    <select
+                                        value={form.scheduleColor}
+                                        onChange={(e) => setForm({ ...form, scheduleColor: e.target.value })}
+                                        className="flex-1 border border-slate-300 rounded-lg p-2.5 font-bold focus:ring-2 focus:ring-brand-500"
+                                    >
+                                        {SCHEDULE_COLORS.map(item => (
+                                            <option key={item.value} value={item.value}>{item.name}</option>
+                                        ))}
+                                    </select>
+                                    <span aria-label="選択色のプレビュー" title={SCHEDULE_COLORS.find(c => c.value === form.scheduleColor)?.name}
+                                        className="w-12 h-9 rounded-lg border border-slate-300 shadow-sm shrink-0"
+                                        style={{ backgroundColor: getScheduleColor(form.scheduleColor) }} />
+                                </div>
+                                <p className="text-[10px] text-slate-500 mt-1">色は進捗状況とは連動しません。進捗状況はデータとして保持します。</p>
                             </div>
 
                             <div>
