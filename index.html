@@ -715,6 +715,71 @@
                 }
             };
 
+            // Ver 1.11: 予定バーの端をドラッグして開始/終了時刻を15分刻みで変更。
+            // 他の予定との重複を許可し、変更がDBで成功した後に画面/Undoへ反映する。
+            const handleResizeSchedule = async (scheduleId, edge, nextTime) => {
+                if (!canEdit || moveInProgress.current) return false;
+                const original = schedules.find(s => s.id === scheduleId);
+                if (!original) return false;
+                const next = {...original, [edge === 'start' ? 'startTime' : 'endTime']: nextTime};
+                const start = slotHourToMinutes(next.startTime);
+                const end = slotHourToMinutes(next.endTime);
+                if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 15) {
+                    showToast('終了時刻は開始時刻より15分以上後にしてください', 'error');
+                    return false;
+                }
+                if (next.startTime === original.startTime && next.endTime === original.endTime) return true;
+                moveInProgress.current = true;
+                try {
+                    if (!supabase) throw new Error('Supabaseに接続されていません');
+                    const {data, error} = await supabase.from('schedules')
+                        .update({start_time: next.startTime, end_time: next.endTime})
+                        .eq('schedule_id', original.id).eq('is_deleted', false).select('schedule_id');
+                    if (error) throw error;
+                    if (!data || data.length !== 1) throw new Error('更新権限がないか予定が見つかりません');
+                    setSchedules(prev => prev.map(x => x.id === original.id ? next : x));
+                    setHistoryStack(prev => [...prev.slice(-29), {type:'UPDATE', prevSchedule:original, newSchedule:next}]);
+                    showToast(`「${original.title}」を ${next.startTime}～${next.endTime} に変更しました`);
+                    return true;
+                } catch(err) {
+                    showToast(`時間変更に失敗しました: ${err.message}`, 'error');
+                    return false;
+                } finally { moveInProgress.current = false; }
+            };
+
+            // 右クリックから色のみを変更。進捗には触れない。選択した同一作業の全員にも対応。
+            const handleChangeScheduleColor = async (scheduleId, color, scope = 'single') => {
+                if (!canEdit || moveInProgress.current) return false;
+                const source = schedules.find(x => x.id === scheduleId);
+                if (!source) return false;
+                const originals = scope === 'all' ? findSameWorkSchedules(source) : [source];
+                const ids = originals.map(x => x.id);
+                moveInProgress.current = true;
+                try {
+                    if (!supabase) throw new Error('Supabaseに接続されていません');
+                    const {data, error} = await supabase.from('schedules')
+                        .update({schedule_color: getScheduleColor(color)})
+                        .in('schedule_id', ids).eq('is_deleted', false).select('schedule_id');
+                    if (error) throw error;
+                    if (!data || data.length !== ids.length) {
+                        await fetchSupabaseData();
+                        throw new Error('一部の予定が更新できませんでした。最新データを再読み込みしました');
+                    }
+                    const changed = new Set(ids);
+                    const nextColor = getScheduleColor(color);
+                    const updated = originals.map(x => ({...x, scheduleColor:nextColor}));
+                    setSchedules(prev => prev.map(x => changed.has(x.id) ? {...x, scheduleColor:nextColor} : x));
+                    setHistoryStack(prev => [...prev.slice(-29), {
+                        type:'BULK_UPDATE', prevSchedules:originals, newSchedules:updated
+                    }]);
+                    showToast(`${ids.length}件の予定色を変更しました`);
+                    return true;
+                } catch(err) {
+                    showToast(`色の変更に失敗しました: ${err.message}`, 'error');
+                    return false;
+                } finally { moveInProgress.current = false; }
+            };
+
             // 共通の予定移動処理: ドラッグ/切り取りとも同じIDをUPDATEし、成功後に画面へ反映
             const handleMoveSchedule = async (scheduleId, targetWorkerId, targetTimeSlot, via = 'drag') => {
                 if (!canEdit || moveInProgress.current) return false;
@@ -1202,6 +1267,8 @@
                                 copiedSchedule={copiedSchedule}
                                 canEdit={canEdit}
                                 onMoveSchedule={handleMoveSchedule}
+                                onResizeSchedule={handleResizeSchedule}
+                                onChangeScheduleColor={handleChangeScheduleColor}
                                 activeCell={activeCell}
                                 onSelectSchedule={(id) => canEdit && setSelectedScheduleId(id)}
                                 onCopySchedule={(sched) => {
@@ -1379,10 +1446,104 @@
         }
 
         // --- TIMELINE VIEW ---
-        function TimelineView({ workers, schedules, searchQuery, density, conflictsMap, selectedDate, selectedScheduleId, copiedSchedule, canEdit, onMoveSchedule, activeCell, onSelectSchedule, onCopySchedule, onCellClick, onScheduleClick }) {
+        function TimelineView({ workers, schedules, searchQuery, density, conflictsMap, selectedDate, selectedScheduleId, copiedSchedule, canEdit, onMoveSchedule, onResizeSchedule, onChangeScheduleColor, activeCell, onSelectSchedule, onCopySchedule, onCellClick, onScheduleClick }) {
             const [dragOverCell, setDragOverCell] = useState(null);
             const [dragScheduleId, setDragScheduleId] = useState(null);
             const dragOrigin = useRef(null);
+            const [colorMenu, setColorMenu] = useState(null);
+            const [colorScope, setColorScope] = useState('single');
+            const [resizePreview, setResizePreview] = useState(null);
+            const resizeActive = useRef(null);
+            const minuteString = (m) => `${String(Math.floor(m / 60)).padStart(2,'0')}:${String(m % 60).padStart(2,'0')}`;
+
+            // 重複する時間帯も予定を重ねず、担当者行の別レーンに配置する。
+            const calculateLanes = (items) => {
+                const lanes = [], byId = {};
+                [...items].sort((a,b) => slotHourToMinutes(a.startTime) - slotHourToMinutes(b.startTime)
+                    || slotHourToMinutes(a.endTime) - slotHourToMinutes(b.endTime)).forEach(item => {
+                    const start = slotHourToMinutes(item.startTime);
+                    const end = slotHourToMinutes(item.endTime);
+                    if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+                    let lane = lanes.findIndex(lastEnd => lastEnd <= start);
+                    if (lane < 0) {lane = lanes.length; lanes.push(end);}
+                    else lanes[lane] = end;
+                    byId[item.id] = lane;
+                });
+                return {byId, count:Math.max(1, lanes.length)};
+            };
+
+            const beginResize = (e, sched, edge) => {
+                if (!canEdit) return;
+                e.stopPropagation();
+                e.preventDefault();
+                setColorMenu(null);
+                const row = e.currentTarget.closest('tr');
+                resizeActive.current = {id:sched.id, edge, row,
+                    start:slotHourToMinutes(sched.startTime),
+                    end:slotHourToMinutes(sched.endTime),
+                    current:null};
+                document.body.style.cursor = 'ew-resize';
+            };
+
+            useEffect(() => {
+                const move = (e) => {
+                    const current = resizeActive.current;
+                    if (!current) return;
+                    e.preventDefault();
+                    const cells = [...current.row.querySelectorAll('td[data-time-slot]')];
+                    if (!cells.length) return;
+                    let cell = cells.find(td => {
+                        const rect = td.getBoundingClientRect();
+                        return e.clientX >= rect.left && e.clientX < rect.right;
+                    });
+                    if (!cell) cell = e.clientX < cells[0].getBoundingClientRect().left ? cells[0] : cells[cells.length-1];
+                    const rect = cell.getBoundingClientRect();
+                    const base = slotHourToMinutes(cell.dataset.timeSlot);
+                    const raw = base + Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * 60;
+                    let minute = Math.round(raw / 15) * 15;
+                    minute = Math.max(7*60, Math.min(20*60, minute));
+                    if (current.edge === 'start') minute = Math.min(minute, current.end - 15);
+                    else minute = Math.max(minute, current.start + 15);
+                    if (current.current === minute) return;
+                    current.current = minute;
+                    setResizePreview({id:current.id, edge:current.edge, value:minuteString(minute)});
+                };
+                const finish = () => {
+                    const current = resizeActive.current;
+                    if (!current) return;
+                    resizeActive.current = null;
+                    document.body.style.cursor = '';
+                    setResizePreview(null);
+                    const oldValue = current.edge === 'start' ? current.start : current.end;
+                    if (current.current !== null && current.current !== oldValue)
+                        onResizeSchedule(current.id, current.edge, minuteString(current.current));
+                };
+                window.addEventListener('pointermove', move);
+                window.addEventListener('pointerup', finish);
+                window.addEventListener('pointercancel', finish);
+                return () => {
+                    window.removeEventListener('pointermove', move);
+                    window.removeEventListener('pointerup', finish);
+                    window.removeEventListener('pointercancel', finish);
+                    document.body.style.cursor = '';
+                };
+            }, [onResizeSchedule]);
+
+            const openColorMenu = (e, sched) => {
+                if (!canEdit) return;
+                e.preventDefault(); e.stopPropagation();
+                setColorScope('single');
+                setColorMenu({id:sched.id, title:sched.title,
+                    x:Math.min(e.clientX, window.innerWidth - 270),
+                    y:Math.min(e.clientY, window.innerHeight - 360)});
+            };
+            useEffect(() => {
+                if (!colorMenu) return;
+                const close = () => setColorMenu(null);
+                window.addEventListener('click', close);
+                window.addEventListener('keydown', close);
+                return () => {window.removeEventListener('click', close); window.removeEventListener('keydown', close);};
+            }, [colorMenu]);
             const onCellDrop = (e, workerId, slot) => {
                 if (!canEdit) return;
                 e.preventDefault();
@@ -1413,13 +1574,11 @@
                             <span className="text-slate-400">|</span>
                             <span className="text-slate-600 flex items-center gap-1 flex-wrap">
                                 <Icon name="copy" className="w-3.5 h-3.5 text-brand-600 shrink-0" />
-                                クリック選択 ➔ <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Delete</kbd> 削除 / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+C</kbd> コピー / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+X</kbd> 切り取り / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+V</kbd> 貼り付け / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+Z</kbd> Undo / ドラッグで時刻・担当者を移動
+                                クリック選択 ➔ <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Delete</kbd> 削除 / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+C</kbd> コピー / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+X</kbd> 切り取り / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+V</kbd> 貼り付け / <kbd className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono text-[10px]">Ctrl+Z</kbd> Undo / ドラッグで時刻・担当者を移動 / バー端で時間変更 / 右クリックで色変更
                             </span>
                         </div>
                         <div className="flex items-center space-x-3 text-[11px]">
-                            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> 完了</span>
-                            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-brand-500"></span> 作業中</span>
-                            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-slate-400"></span> 未着手</span>
+                            <span className="text-slate-500">バーの色は進捗と無関係です（右クリックで変更）</span>
                         </div>
                     </div>
 
@@ -1442,6 +1601,13 @@
                                     const workerSchedules = schedules.filter(s => String(s.workerId) === String(worker.id));
                                     const hasConflict = (conflictsMap[worker.id] || []).length > 0;
                                     const rowPadding = density === 'compact' ? 'py-1' : 'py-2.5';
+                                    const laneLayout = calculateLanes(workerSchedules.map(s => {
+                                        if (resizePreview?.id !== s.id) return s;
+                                        return {...s, [resizePreview.edge === 'start' ? 'startTime' : 'endTime']:resizePreview.value};
+                                    }));
+                                    const barHeight = density === 'compact' ? 29 : 37;
+                                    const laneStep = barHeight + 4;
+                                    const rowHeight = Math.max(density === 'compact' ? 38 : 58, laneLayout.count * laneStep + 5);
 
                                     return (
                                         <tr key={worker.id} className="hover:bg-slate-50/80 transition group">
@@ -1454,7 +1620,7 @@
                                                                 {worker.name}
                                                                 {hasConflict && (
                                                                     <span className="bg-red-500 text-white text-[9px] px-1 py-0.2 rounded font-bold animate-pulse">
-                                                                        重複
+                                                                        重複あり
                                                                     </span>
                                                                 )}
                                                             </div>
@@ -1472,7 +1638,9 @@
                                                 // 例: 17:30終了なら17:00セルの左半分まで表示する。
                                                 const slotStart = slotHourToMinutes(slot);
                                                 const slotEnd = slotStart + 60;
-                                                const matches = workerSchedules.filter(s => {
+                                                const matches = workerSchedules.map(s => resizePreview?.id === s.id
+                                                    ? {...s, [resizePreview.edge === 'start' ? 'startTime' : 'endTime']:resizePreview.value}
+                                                    : s).filter(s => {
                                                     const start = slotHourToMinutes(s.startTime);
                                                     const end = slotHourToMinutes(s.endTime);
                                                     return Number.isFinite(start) && Number.isFinite(end) &&
@@ -1484,6 +1652,8 @@
                                                 return (
                                                     <td
                                                         key={slot}
+                                                        data-time-slot={slot}
+                                                        style={{height:`${rowHeight}px`, minWidth:'70px'}}
                                                         onClick={() => onCellClick(worker.id, slot)}
                                                         onDragOver={e => {
                                                             if (!canEdit || !dragOrigin.current) return;
@@ -1530,6 +1700,7 @@
                                                                         setDragScheduleId(null);
                                                                         setDragOverCell(null);
                                                                     }}
+                                                                    onContextMenu={e => openColorMenu(e, sched)}
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
                                                                         onSelectSchedule(sched.id);
@@ -1538,12 +1709,26 @@
                                                                         e.stopPropagation();
                                                                         onScheduleClick(sched);
                                                                     }}
-                                                                    style={{ left: `${leftPct}%`, width: `${widthPct}%`, backgroundColor: getScheduleColor(sched.scheduleColor), color: '#FFFFFF' }}
-                                                                    className={`absolute top-0.5 bottom-0.5 p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:brightness-110 transition group/card ${
+                                                                    style={{ left: `${leftPct}%`, width: `${widthPct}%`, top:`${3 + (laneLayout.byId[sched.id] || 0) * laneStep}px`, bottom:'auto', height:`${barHeight}px`, backgroundColor: getScheduleColor(sched.scheduleColor), color: '#FFFFFF' }}
+                                                                    className={`absolute p-1 rounded-md text-[10px] leading-tight font-medium overflow-hidden shadow-2xs hover:brightness-110 transition group/card ${
                                                                         isSelected ? 'ring-2 ring-yellow-400 ring-offset-1 z-10' : ''
                                                                     } ${isCopied ? 'copied-ring' : ''} ${dragScheduleId === sched.id ? 'opacity-50' : ''} ${canEdit ? 'cursor-grab active:cursor-grabbing' : ''}`}
                                                                 >
-                                                                    <div className="flex items-center justify-between w-full">
+                                                                    {canEdit && isStart && <div
+                                                                        title="左端をドラッグして開始時刻を変更（15分単位）"
+                                                                        onPointerDown={e => beginResize(e, sched, 'start')}
+                                                                        draggable={false}
+                                                                        className="absolute left-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-20 rounded-l-md"
+                                                                        style={{touchAction:'none'}}
+                                                                    />}
+                                                                    {canEdit && endMinutes > slotStart && endMinutes <= slotEnd && <div
+                                                                        title="右端をドラッグして終了時刻を変更（15分単位）"
+                                                                        onPointerDown={e => beginResize(e, sched, 'end')}
+                                                                        draggable={false}
+                                                                        className="absolute right-0 top-0 bottom-0 w-2 bg-white/25 hover:bg-white/75 cursor-ew-resize z-20 rounded-r-md"
+                                                                        style={{touchAction:'none'}}
+                                                                    />}
+                                                                    <div className="flex items-center justify-between w-full pl-1 pr-1">
                                                                         {isStart ? (
                                                                             <div className="font-bold truncate flex-1">
                                                                                 {sched.startTime} {sched.title}
@@ -1584,6 +1769,42 @@
                             </tbody>
                         </table>
                     </div>
+                    {canEdit && colorMenu && (() => {
+                        const source = schedules.find(s => s.id === colorMenu.id);
+                        const key = source && JSON.stringify([source.date,source.startTime,source.endTime,
+                            (source.title||'').trim(),(source.location||'').trim(),(source.notes||'').trim(),source.category||'work']);
+                        const group = source ? schedules.filter(s => JSON.stringify([s.date,s.startTime,s.endTime,
+                            (s.title||'').trim(),(s.location||'').trim(),(s.notes||'').trim(),s.category||'work']) === key) : [];
+                        return source && <div
+                            className="fixed z-[90] w-[260px] rounded-xl shadow-2xl border border-slate-200 bg-white p-3 text-xs text-slate-800"
+                            style={{left:Math.max(8,colorMenu.x),top:Math.max(8,colorMenu.y)}}
+                            onClick={e => e.stopPropagation()} onContextMenu={e => e.preventDefault()}>
+                            <div className="font-bold mb-2 truncate" title={source.title}>予定色を変更：{source.title}</div>
+                            <label className="flex gap-2 items-center mb-1 cursor-pointer">
+                                <input type="radio" name="color-scope" checked={colorScope==='single'} onChange={() => setColorScope('single')}/>
+                                この担当者だけ
+                            </label>
+                            <label className="flex gap-2 items-center mb-2 cursor-pointer">
+                                <input type="radio" name="color-scope" checked={colorScope==='all'} disabled={group.length<2} onChange={() => setColorScope('all')}/>
+                                同じ作業の全員（{group.length}件）
+                            </label>
+                            <div className="grid grid-cols-5 gap-2">
+                                {SCHEDULE_COLORS.map(c => <button key={c.value} type="button"
+                                    title={c.name} aria-label={`${c.name}に変更`}
+                                    className={`h-8 rounded-md border-2 hover:scale-110 transition-transform ${source.scheduleColor === c.value ? 'border-slate-900' : 'border-transparent'}`}
+                                    style={{backgroundColor:c.value}}
+                                    onClick={async () => {
+                                        const scope = colorScope;
+                                        setColorMenu(null);
+                                        await onChangeScheduleColor(source.id, c.value, scope);
+                                    }}/>) }
+                            </div>
+                            <div className="mt-2 flex justify-between items-center text-[10px] text-slate-500">
+                                <span>色を選ぶと保存します</span>
+                                <button type="button" className="underline" onClick={() => setColorMenu(null)}>閉じる</button>
+                            </div>
+                        </div>;
+                    })()}
                 </div>
             );
         }
